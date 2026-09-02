@@ -44,10 +44,10 @@ class Settings(BaseSettings):
     search_page_batch_size: int = Field(default=20, alias="SEARCH_PAGE_BATCH_SIZE")
     records_per_page: str = Field(default="50", alias="RECORDS_PER_PAGE")
 
-    # === SMTP — отправка писем поставщикам при отказе (ФАС-ЭКСПЕРТ 24) ===
+    # === SMTP — отправка писем поставщикам при отказе (Арина Еремян, rnp-help.ru) ===
     smtp_host: str = Field(default="smtp.timeweb.ru", alias="SMTP_HOST")
     smtp_port: int = Field(default=465, alias="SMTP_PORT")
-    smtp_login: str = Field(default="otkaz@fasexpert24.ru", alias="SMTP_LOGIN")
+    smtp_login: str = Field(default="lawyer@rnp-help.ru", alias="SMTP_LOGIN")
     smtp_password: str = Field(default="", alias="SMTP_PASSWORD")
     email_rejections_enabled: bool = Field(
         default=False, alias="EMAIL_REJECTIONS_ENABLED"
@@ -56,14 +56,14 @@ class Settings(BaseSettings):
     email_resend_days: int = Field(default=30, alias="EMAIL_RESEND_DAYS")
 
     # === Корпоративные заголовки писем ===
-    from_name: str = Field(default="ФасЭксперт24", alias="FROM_NAME")
-    from_email: str = Field(default="otkaz@fasexpert24.ru", alias="FROM_EMAIL")
-    reply_to: str = Field(default="otkaz@fasexpert24.ru", alias="REPLY_TO")
+    from_name: str = Field(default="Еремян Арина", alias="FROM_NAME")
+    from_email: str = Field(default="lawyer@rnp-help.ru", alias="FROM_EMAIL")
+    reply_to: str = Field(default="lawyer@rnp-help.ru", alias="REPLY_TO")
     unsubscribe_email: str = Field(
-        default="otkaz@fasexpert24.ru", alias="UNSUBSCRIBE_EMAIL"
+        default="lawyer@rnp-help.ru", alias="UNSUBSCRIBE_EMAIL"
     )
-    bounce_email: str = Field(default="bounce@fasexpert24.ru", alias="BOUNCE_EMAIL")
-    dmarc_email: str = Field(default="dmarc@fasexpert24.ru", alias="DMARC_EMAIL")
+    bounce_email: str = Field(default="bounce@rnp-help.ru", alias="BOUNCE_EMAIL")
+    dmarc_email: str = Field(default="dmarc@rnp-help.ru", alias="DMARC_EMAIL")
 
     class Config:
         env_file = BASE_DIR / ".env"

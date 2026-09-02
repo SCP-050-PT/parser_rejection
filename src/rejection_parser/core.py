@@ -98,7 +98,7 @@ class SessionManager:
         self._update_session_headers(self.session, user_agent, platform)
         logger.debug(f"🎭 User-Agent изменён: {user_agent[:50]}...")
 
-    def make_request_fast(self, url: str, session, timeout: int = 20, max_retries: int = 3) -> Optional[Any]:
+    def make_request_fast(self, url: str, session, timeout: int = 10, max_retries: int = 2) -> Optional[Any]:
         for attempt in range(max_retries):
             try:
                 response = session.get(url, timeout=timeout)

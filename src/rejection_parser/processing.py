@@ -1,11 +1,7 @@
 """
 Обработка контрактов и парсинг отказов.
-VK версия — убраны Telegram-зависимости.
-Добавлено: парсинг карточки контракта, отправка писем поставщикам.
-
-ИСПРАВЛЕНИЕ 2026-06-17:
-- Парсинг customer_name (заказчик) из common-info.html
-- Передача customer_name в email_sender (вместо supplier_name)
+Версия для заказчицы Арины Еремян (rnp-help.ru).
+Новые поля в Excel: цена, регион, заказчик, ИНН, телефон, дата заключения.
 """
 
 import time
@@ -51,81 +47,6 @@ class ContractProcessor:
         # Инициализация парсера карточки и отправщика писем
         self.card_parser = get_contract_card_parser(session_manager)
         self.email_sender = get_email_sender()
-
-    def _parse_customer_name(self, html_content: str) -> str:
-        """
-        Парсит название ЗАКАЗЧИКА из HTML карточки контракта (common-info.html).
-        Ищет блок с классом cardMainInfo__title содержащий "Заказчик".
-        """
-        try:
-            soup = BeautifulSoup(html_content, "lxml")
-
-            # Вариант 1: Ищем div с заголовком "Заказчик"
-            for section in soup.find_all("div", class_="cardMainInfo__section"):
-                title_span = section.find("span", class_="cardMainInfo__title")
-                if title_span and "Заказчик" in title_span.get_text(strip=True):
-                    content_span = section.find("span", class_="cardMainInfo__content")
-                    if content_span:
-                        # Ищем ссылку или текст
-                        link = content_span.find("a")
-                        if link:
-                            name = link.get_text(strip=True)
-                            if name and len(name) > 5:
-                                return name
-                        # Если ссылки нет — берём весь текст
-                        text = content_span.get_text(strip=True)
-                        if text and len(text) > 5:
-                            return text
-
-            # Вариант 2: Ищем по тексту "Заказчик" в любом span
-            for span in soup.find_all("span", class_="cardMainInfo__title"):
-                if "Заказчик" in span.get_text(strip=True):
-                    parent = span.find_parent("div", class_="cardMainInfo__section")
-                    if parent:
-                        content = parent.find("span", class_="cardMainInfo__content")
-                        if content:
-                            link = content.find("a")
-                            if link:
-                                name = link.get_text(strip=True)
-                                if name and len(name) > 5:
-                                    return name
-                            text = content.get_text(strip=True)
-                            if text and len(text) > 5:
-                                return text
-
-            # Вариант 3: Ищем в sectionMainInfo (как в твоём HTML)
-            for div in soup.find_all("div", class_="sectionMainInfo"):
-                title = div.find("span", class_="cardMainInfo__title")
-                if title and "Заказчик" in title.get_text(strip=True):
-                    content = div.find("span", class_="cardMainInfo__content")
-                    if content:
-                        link = content.find("a")
-                        if link:
-                            name = link.get_text(strip=True)
-                            if name and len(name) > 5:
-                                return name
-                        text = content.get_text(strip=True)
-                        if text and len(text) > 5:
-                            return text
-
-            # Вариант 4: Ищем по заголовку h2 "Сведения о заказчике"
-            for h2 in soup.find_all("h2", class_="blockInfo__title"):
-                if "заказчик" in h2.get_text(strip=True).lower():
-                    parent = h2.find_parent("div", class_="blockInfo")
-                    if parent:
-                        # Ищем первую ссылку на организацию
-                        link = parent.find("a", href=re.compile(r"organization", re.I))
-                        if link:
-                            name = link.get_text(strip=True)
-                            if name and len(name) > 5:
-                                return name
-
-            logger.warning("   ⚠️ Заказчик не найден в HTML")
-            return ""
-
-        except Exception as e:
-            logger.error(f"   ❌ Ошибка парсинга заказчика: {e}")
-            return ""
 
     def _parse_search_page(self, html_content: str) -> List[Dict]:
         soup = BeautifulSoup(html_content, "lxml")
@@ -175,6 +96,11 @@ class ContractProcessor:
         return contracts
 
     def _parse_reject_date(self, html_content: str) -> Optional[str]:
+        """
+        Парсит дату и время размещения решения об отказе из reject-info.html.
+        Берёт дату из заголовка "Решение об одностороннем отказе № ... от DD.MM.YYYY"
+        и время из attachment__value под "Подписано" (Заказчик).
+        """
         try:
             soup = BeautifulSoup(html_content, "lxml")
             attachments = soup.find_all("section", class_="attachment")
@@ -189,23 +115,32 @@ class ContractProcessor:
                     self.REJECTION_KEYWORD in title_text
                     and "Извещение об отмене" not in title_text
                 ):
-                    match = re.search(r"от\s+(\d{2}\.\d{2}\.\d{4})", title_text)
-                    if match:
-                        return match.group(1)
+                    # Дата из заголовка: "от 15.06.2026"
+                    date_match = re.search(r"от\s+(\d{2}\.\d{2}\.\d{4})", title_text)
+                    if not date_match:
+                        continue
 
+                    reject_date = date_match.group(1)
+
+                    # Ищем время под "Подписано" (Заказчик)
                     rows = attachment.find_all("section", class_="col-6")
                     for row in rows:
                         title = row.find("section", class_="section__title")
-                        if title and "Поставщик" in title.get_text():
+                        if title and "Заказчик" in title.get_text():
                             date_value = row.find("section", class_="attachment__value")
                             if date_value:
                                 date_text = date_value.get_text(strip=True)
-                                match = re.search(
+                                # Формат: "15.06.2026 18:11 (МСК)"
+                                time_match = re.search(
                                     r"(\d{2}\.\d{2}\.\d{4}\s+\d{2}:\d{2})", date_text
                                 )
-                                if match:
-                                    return match.group(1)
-                    break
+                                if time_match:
+                                    return time_match.group(1)
+                            break
+
+                    # Если время не нашли — возвращаем только дату
+                    return reject_date
+
             return None
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга даты отказа: {e}")
@@ -214,34 +149,19 @@ class ContractProcessor:
     def _send_email_to_supplier(
         self,
         reestr_number: str,
-        contract_number: str,
-        customer_name: str,  # ← НОВОЕ: заказчик
-        supplier_name: str,  # ← поставщик
+        supplier_name: str,
         email: str,
     ) -> Dict[str, Any]:
         """
         Отправляет письмо поставщику при отказе.
-        customer_name = ЗАКАЗЧИК (подставляется в шаблон)
-        supplier_name = ПОСТАВЩИК (для логов)
         Returns: {"sent": bool, "status": str, "details": str}
         """
         if not email or "@" not in email:
             return {"sent": False, "status": "no_email", "details": "Email не найден"}
 
-        # Формируем URL заказчика
-        customer_url = (
-            f"https://zakupki.gov.ru/epz/organization/view/info.html?organizationCode="
-        )
-
-        # Отправляем письмо
-        # customer_name = ЗАКАЗЧИК (в шаблон)
-        # supplier_name = ПОСТАВЩИК (в лог)
         result = self.email_sender.send(
             to_email=email,
             contract_number=reestr_number,
-            customer_name=customer_name,  # ← ЗАКАЗЧИК в шаблон!
-            customer_url=customer_url,
-            supplier_name=supplier_name,  # ← ПОСТАВЩИК в лог
         )
 
         return {
@@ -267,7 +187,6 @@ class ContractProcessor:
                 logger.info(f"  ⏭ [{contract_number}] уже в кэше")
                 return 0
 
-            # Уменьшенная задержка перед запросом
             time.sleep(0.1 + random.uniform(0, 0.2))
 
             response = self.session_manager.make_request_fast(reject_url, session)
@@ -314,48 +233,34 @@ class ContractProcessor:
             # === НАЙДЕН СЕГОДНЯШНИЙ ОТКАЗ ===
             found_date = datetime.now().strftime("%d.%m.%Y %H:%M")
 
-            # === ПАРСИМ КАРТОЧКУ КОНТРАКТА ===
+            # Парсим карточку контракта
             logger.info(f"  📄 [{contract_number}] Парсим карточку контракта...")
-
-            # 1. Загружаем common-info.html для получения заказчика
-            common_info_url = f"https://zakupki.gov.ru/epz/contract/contractCard/common-info.html?reestrNumber={reestr_number}"
-            customer_name = ""
-            try:
-                common_response = self.session_manager.make_request_fast(common_info_url, session)
-                if common_response and common_response.status_code == 200:
-                    customer_name = self._parse_customer_name(common_response.text)
-                    if customer_name:
-                        logger.info(f"  🏛️ [{contract_number}] Заказчик: {customer_name[:80]}...")
-                    else:
-                        logger.warning(f"  ⚠️ [{contract_number}] Заказчик не найден в common-info")
-                else:
-                    logger.warning(f"  ⚠️ [{contract_number}] Не удалось загрузить common-info")
-            except Exception as e:
-                logger.error(f"  ❌ [{contract_number}] Ошибка загрузки common-info: {e}")
-
-            # 2. Парсим данные поставщика (email, название)
             card_data = self.card_parser.parse(reestr_number)
+
             supplier_name = card_data.supplier_name
             email = card_data.email
+            inn = card_data.inn
+            phone = card_data.phone
+            price = card_data.price
+            region = card_data.region
+            customer_name = card_data.customer_name
+            contract_date = card_data.contract_date
 
             logger.info(
-                f"  📋 [{contract_number}] Поставщик: {supplier_name[:50] if supplier_name else 'не найден'}... | "
-                f"Email: {email or 'не найден'}"
+                f"  📋 [{contract_number}] "
+                f"Поставщик: {supplier_name[:40] if supplier_name else 'не найден'}... | "
+                f"Email: {email or 'не найден'} | "
+                f"ИНН: {inn or 'не найден'} | "
+                f"Цена: {price or 'не найден'} | "
+                f"Заказчик: {customer_name[:40] if customer_name else 'не найден'}..."
             )
 
-            # Если заказчик не найден — используем поставщика как fallback
-            if not customer_name:
-                customer_name = supplier_name
-                logger.warning(f"  ⚠️ [{contract_number}] Заказчик не найден, используем поставщика как fallback")
-
-            # Отправляем письмо поставщику (если email найден)
+            # Отправляем письмо поставщику
             email_result = {"sent": False, "status": "not_attempted", "details": ""}
             if email:
                 email_result = self._send_email_to_supplier(
                     reestr_number=reestr_number,
-                    contract_number=contract_number,
-                    customer_name=customer_name,  # ← ЗАКАЗЧИК!
-                    supplier_name=supplier_name,  # ← ПОСТАВЩИК
+                    supplier_name=supplier_name,
                     email=email,
                 )
                 logger.info(
@@ -373,8 +278,7 @@ class ContractProcessor:
                 "reject_info_url": reject_url,
                 "reject_date": reject_date,
                 "found_date": found_date,
-                "customer_name": customer_name,  # ← ЗАКАЗЧИК
-                "supplier_name": supplier_name,  # ← ПОСТАВЩИК
+                "supplier_name": supplier_name,
                 "email": email,
                 "email_sent": email_result["sent"],
                 "email_status": email_result["status"],
@@ -388,7 +292,6 @@ class ContractProcessor:
                 contract_number=contract_number,
                 reject_date=reject_date,
                 reject_url=reject_url,
-                customer_name=customer_name,  # ← Сохраняем заказчика
                 supplier_name=supplier_name,
                 email=email,
                 email_sent=email_result["sent"],
@@ -413,7 +316,6 @@ class ContractProcessor:
                             "reject_url": reject_url,
                             "reject_date": reject_date,
                             "admin_chat_id": self.admin_vk_id,
-                            "customer_name": customer_name,
                             "supplier_name": supplier_name,
                             "email": email,
                             "email_sent": email_result["sent"],
@@ -426,13 +328,17 @@ class ContractProcessor:
 
             # Сохранение в Excel
             self._save_to_excel(
-                contract_number=contract_number,
+                reestr_number=reestr_number,
                 reject_url=reject_url,
                 reject_date=reject_date,
-                customer_name=customer_name,
                 supplier_name=supplier_name,
-                email_sent=email_result["sent"],
-                email_status=email_result["status"],
+                email=email,
+                inn=inn,
+                phone=phone,
+                price=price,
+                region=region,
+                customer_name=customer_name,
+                contract_date=contract_date,
             )
 
             return 1 if is_new else 0
@@ -498,39 +404,47 @@ class ContractProcessor:
 
     def _save_to_excel(
         self,
-        contract_number: str,
+        reestr_number: str,
         reject_url: str,
         reject_date: str,
-        customer_name: str = "",
         supplier_name: str = "",
-        email_sent: bool = False,
-        email_status: str = "",
+        email: str = "",
+        inn: str = "",
+        phone: str = "",
+        price: str = "",
+        region: str = "",
+        customer_name: str = "",
+        contract_date: str = "",
     ):
+        """
+        Сохраняет запись в Excel с полным набором полей для Арины.
+        Ссылка на контракт = reject_url (reject-info.html).
+        """
         try:
-            sent_str = "Да" if email_sent else "Нет"
-            if not email_sent and email_status:
-                sent_str = f"Нет ({email_status})"
-
             record = {
-                "Номер контракта": contract_number,
-                "Ссылка на отказ": reject_url,
-                "Новый": "Да",
-                "Дата подписания заказчиком": reject_date,
-                "Заказчик": customer_name,
-                "Поставщик": supplier_name,
-                "Отправлено": sent_str,
+                "Реестровый номер контракта": reestr_number,
+                "Ссылка на контракт": reject_url,
+                "Цена контракта": price,
+                "Регион Заказчика": region,
+                "Наименование Заказчика": customer_name,
+                "Наименование поставщика": supplier_name,
+                "ИНН Поставщика": inn,
+                "Телефон Поставщика": phone,
+                "Почта поставщика": email,
+                "Дата заключения контракта": contract_date,
+                "Дата размещения решения о расторжении": reject_date,
             }
             result = self.excel_manager.add_record(record)
             if result:
                 with self._lock:
                     self._save_counter += 1
                 logger.info(
-                    f"  💾 [{contract_number}] Запись добавлена в Excel (буфер: {self._save_counter})"
+                    f"  💾 [{reestr_number}] Запись добавлена в Excel (буфер: {self._save_counter})"
                 )
             else:
-                logger.debug(f"  ⏭ [{contract_number}] Пропущен (дубликат/фильтр)")
+                logger.debug(f"  ⏭ [{reestr_number}] Пропущен (дубликат/фильтр)")
         except Exception as e:
-            logger.error(f"  ❌ [{contract_number}] Excel ошибка: {e}")
+            logger.error(f"  ❌ [{reestr_number}] Excel ошибка: {e}")
 
     def _flush_page_to_disk(self):
         with self._lock:

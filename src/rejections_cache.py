@@ -25,7 +25,6 @@ class RejectionState:
     last_check: str  # ISO формат
     # Новые поля для email
     supplier_name: str = ""  # Название поставщика
-    customer_name: str = ""
     email: str = ""  # Email поставщика
     email_sent: bool = False  # Отправлено ли письмо
     email_status: str = ""  # Статус отправки (sent, error, blacklist и т.д.)
@@ -162,7 +161,6 @@ class RejectionsCache:
         reject_date: str,
         reject_url: str,
         supplier_name: str = "",
-        customer_name: str = "",
         email: str = "",
         email_sent: bool = False,
         email_status: str = "",

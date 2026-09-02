@@ -266,7 +266,7 @@ class SearchManager:
             price_from=price_from,
             price_to=price_to,
         )
-        response = self._make_request(url, timeout=25, max_retries=3)
+        response = self._make_request(url, timeout=15, max_retries=2)
         if response and response.status_code == 200:
             result = self._parse_total_records(response.text)
             self._records_cache[key] = result
@@ -378,7 +378,7 @@ class SearchManager:
             )
             for attempt in range(2):
                 try:
-                    response = session.get(url, timeout=25)
+                    response = session.get(url, timeout=15)
                     if response.status_code == 429:
                         time.sleep(2 * (attempt + 1))
                         continue

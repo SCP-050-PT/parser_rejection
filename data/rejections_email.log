@@ -1,0 +1,2 @@
+2026-06-15 22:01:59,625 [INFO] sending APIRequest GetMetaRequest, GET https://cloud-api.yandex.net/v1/disk/resources
+2026-06-15 22:01:59,859 [INFO] sending APIRequest GetMetaRequest, GET https://cloud-api.yandex.net/v1/disk/resources

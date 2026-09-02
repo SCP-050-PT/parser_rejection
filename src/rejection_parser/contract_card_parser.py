@@ -1,6 +1,7 @@
 """
 contract_card_parser.py — парсинг карточки контракта zakupki.gov.ru
-Извлекает: название поставщика, email, ИНН, телефон из раздела "Информация о поставщиках"
+Версия для заказчицы Арины Еремян (rnp-help.ru).
+Извлекает: цена, заказчик, регион, дата заключения, поставщик, email, ИНН, телефон.
 """
 
 import re
@@ -16,6 +17,13 @@ from loguru import logger
 class ContractCardData:
     """Данные из карточки контракта"""
 
+    # === Новые поля ===
+    price: str = ""  # Цена контракта (например: "278 285,83 ₽")
+    region: str = ""  # Регион заказчика (полный адрес)
+    customer_name: str = ""  # Наименование заказчика
+    contract_date: str = ""  # Дата заключения контракта (DD.MM.YYYY)
+
+    # === Старые поля поставщика ===
     supplier_name: str = ""
     email: str = ""
     inn: str = ""
@@ -27,6 +35,10 @@ class ContractCardData:
 
     def to_dict(self) -> Dict[str, Any]:
         return {
+            "price": self.price,
+            "region": self.region,
+            "customer_name": self.customer_name,
+            "contract_date": self.contract_date,
             "supplier_name": self.supplier_name,
             "email": self.email,
             "inn": self.inn,
@@ -48,12 +60,11 @@ class ContractCardParser:
 
     def parse(self, reestr_number: str) -> ContractCardData:
         """
-        Парсит карточку контракта и возвращает данные поставщика.
+        Парсит карточку контракта и возвращает данные поставщика + заказчика.
         """
         url = self._build_url(reestr_number)
         logger.info(f"  📄 Парсим карточку контракта: {reestr_number}")
 
-        # Небольшая задержка перед запросом
         time.sleep(0.5 + random.uniform(0, 0.5))
 
         try:
@@ -78,7 +89,76 @@ class ContractCardParser:
         try:
             soup = BeautifulSoup(html, "lxml")
 
-            # Ищем раздел "Информация о поставщиках"
+            # =====================================================================
+            # 1. ЦЕНА КОНТРАКТА
+            # =====================================================================
+            price_elem = soup.find("span", class_="cardMainInfo__content cost")
+            if price_elem:
+                data.price = price_elem.get_text(strip=True)
+            else:
+                # Альтернативный поиск
+                price_div = soup.find("div", class_="price")
+                if price_div:
+                    price_span = price_div.find("span", class_="cardMainInfo__content")
+                    if price_span:
+                        data.price = price_span.get_text(strip=True)
+
+            # =====================================================================
+            # 2. НАИМЕНОВАНИЕ ЗАКАЗЧИКА
+            # =====================================================================
+            for section in soup.find_all("div", class_="cardMainInfo__section"):
+                title = section.find("span", class_="cardMainInfo__title")
+                if title and "Заказчик" in title.get_text():
+                    content = section.find("span", class_="cardMainInfo__content")
+                    if content:
+                        # Берём текст, убираем лишние пробелы
+                        data.customer_name = content.get_text(separator=" ", strip=True)
+                        # Убираем возможные артефакты HTML
+                        data.customer_name = re.sub(
+                            r"\s+", " ", data.customer_name
+                        ).strip()
+                    break
+
+            # =====================================================================
+            # 3. ДАТА ЗАКЛЮЧЕНИЯ КОНТРАКТА
+            # =====================================================================
+            for section in soup.find_all("div", class_="cardMainInfo__section"):
+                title = section.find("span", class_="cardMainInfo__title")
+                if title and "Заключение контракта" in title.get_text():
+                    content = section.find("span", class_="cardMainInfo__content")
+                    if content:
+                        data.contract_date = content.get_text(strip=True)
+                    break
+
+            # =====================================================================
+            # 4. РЕГИОН ЗАКАЗЧИКА (адрес места поставки)
+            # =====================================================================
+            # Ищем блок "Информация о месте поставки товара, выполнения работы или оказания услуги"
+            delivery_section = None
+            for h2 in soup.find_all("h2", class_=re.compile(r"blockInfo__title")):
+                if "Информация о месте поставки" in h2.get_text():
+                    delivery_section = h2.find_parent("div", class_="blockInfo")
+                    break
+
+            if delivery_section:
+                info_span = delivery_section.find("span", class_="section__info")
+                if info_span:
+                    data.region = info_span.get_text(separator=" ", strip=True)
+                    data.region = re.sub(r"\s+", " ", data.region).strip()
+                else:
+                    # Пробуем найти по другому
+                    section = delivery_section.find(
+                        "section", class_="blockInfo__section"
+                    )
+                    if section:
+                        info = section.find("span", class_="section__info")
+                        if info:
+                            data.region = info.get_text(separator=" ", strip=True)
+                            data.region = re.sub(r"\s+", " ", data.region).strip()
+
+            # =====================================================================
+            # 5. ИНФОРМАЦИЯ О ПОСТАВЩИКАХ
+            # =====================================================================
             supplier_section = None
 
             # Вариант 1: по заголовку h2
@@ -190,8 +270,14 @@ class ContractCardParser:
                     data.email = email_match.group(0).lower().strip()
 
             logger.info(
-                f"  ✅ Карточка спарсена: {data.supplier_name[:50] if data.supplier_name else 'не найдено'}... | "
-                f"Email: {data.email or 'не найден'} | ИНН: {data.inn or 'не найден'}"
+                f"  ✅ Карточка спарсена: "
+                f"Цена: {data.price or 'не найдена'} | "
+                f"Заказчик: {data.customer_name[:40] if data.customer_name else 'не найден'}... | "
+                f"Регион: {data.region[:40] if data.region else 'не найден'}... | "
+                f"Дата заключения: {data.contract_date or 'не найдена'} | "
+                f"Поставщик: {data.supplier_name[:40] if data.supplier_name else 'не найдено'}... | "
+                f"Email: {data.email or 'не найден'} | "
+                f"ИНН: {data.inn or 'не найден'}"
             )
 
             return data

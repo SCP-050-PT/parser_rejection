@@ -1,0 +1,68 @@
+[
+  {
+    "timestamp": "2026-06-17T22:19:04.745228",
+    "email": "test@gmail.com",
+    "status": "sent",
+    "details": "template_1"
+  },
+  {
+    "timestamp": "2026-06-17T22:37:40.631730",
+    "email": "test@gmail.com",
+    "status": "skipped_duplicate",
+    "details": ""
+  },
+  {
+    "timestamp": "2026-06-17T22:40:11.933408",
+    "email": "test@gmail.com",
+    "status": "skipped_duplicate",
+    "details": ""
+  },
+  {
+    "timestamp": "2026-06-17T22:41:07.847688",
+    "email": "test@gmail.com",
+    "status": "skipped_duplicate",
+    "details": ""
+  },
+  {
+    "timestamp": "2026-06-17T22:41:14.312608",
+    "email": "test@gmail.com",
+    "status": "skipped_duplicate",
+    "details": ""
+  },
+  {
+    "timestamp": "2026-06-18T09:24:28.236037",
+    "email": "integration_12040_1781763846@gmail.com",
+    "status": "sent",
+    "details": "template_1"
+  },
+  {
+    "timestamp": "2026-06-18T09:31:15.295553",
+    "email": "test_15336_1781764249@gmail.com",
+    "status": "sent",
+    "details": "template_0"
+  },
+  {
+    "timestamp": "2026-06-18T09:31:40.478863",
+    "email": "integration_16824_1781764280@gmail.com",
+    "status": "sent",
+    "details": "template_1"
+  },
+  {
+    "timestamp": "2026-06-19T17:24:31.500482",
+    "email": "ooo.tsm@internet.ru",
+    "status": "sent",
+    "details": "template_2"
+  },
+  {
+    "timestamp": "2026-06-19T17:24:41.862145",
+    "email": "ooo.tsm@internet.ru",
+    "status": "skipped_duplicate",
+    "details": ""
+  },
+  {
+    "timestamp": "2026-06-19T17:25:19.075644",
+    "email": "g@info-prom.tech",
+    "status": "sent",
+    "details": "template_1"
+  }
+]

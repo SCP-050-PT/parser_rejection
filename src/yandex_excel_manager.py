@@ -1,7 +1,8 @@
 """
 Менеджер для работы с Excel-файлами на Яндекс.Диске для парсера отказов.
-Версия VK: убраны Telegram-уведомления, используется admin_vk_id.
-Добавлены колонки: Поставщик, Отправлено.
+Версия для заказчицы Арины Еремян (rnp-help.ru).
+Новые колонки: Реестровый номер, Ссылка на контракт, Цена, Регион, Заказчик,
+Поставщик, ИНН, Телефон, Почта, Дата заключения, Дата решения о расторжении.
 """
 
 import pandas as pd
@@ -23,12 +24,17 @@ class YandexExcelManager:
 
     COLUMNS = [
         "№ п/п",
-        "Номер контракта",
-        "Ссылка на отказ",
-        "Новый",
-        "Дата подписания заказчиком",
-        "Поставщик",
-        "Отправлено",
+        "Реестровый номер контракта",
+        "Ссылка на контракт",
+        "Цена контракта",
+        "Регион Заказчика",
+        "Наименование Заказчика",
+        "Наименование поставщика",
+        "ИНН Поставщика",
+        "Телефон Поставщика",
+        "Почта поставщика",
+        "Дата заключения контракта",
+        "Дата размещения решения о расторжении",
     ]
 
     def __init__(self, yandex_service, chat_id: int, local_temp_dir: Path):
@@ -185,9 +191,9 @@ class YandexExcelManager:
             today_str = self.current_date.strftime("%d.%m.%Y")
             original_count = len(self._df)
 
-            if "Дата подписания заказчиком" in self._df.columns:
+            if "Дата размещения решения о расторжении" in self._df.columns:
                 mask = (
-                    self._df["Дата подписания заказчиком"]
+                    self._df["Дата размещения решения о расторжении"]
                     .astype(str)
                     .str.contains(today_str, na=False)
                 )
@@ -217,13 +223,13 @@ class YandexExcelManager:
             return
         self._df["№ п/п"] = range(1, len(self._df) + 1)
 
-    def _is_duplicate(self, reject_url: str) -> bool:
-        """Проверяет дубликат по URL отказа"""
-        if not reject_url or self._df is None or self._df.empty:
+    def _is_duplicate(self, contract_url: str) -> bool:
+        """Проверяет дубликат по URL контракта"""
+        if not contract_url or self._df is None or self._df.empty:
             return False
 
-        if "Ссылка на отказ" in self._df.columns:
-            return reject_url in self._df["Ссылка на отказ"].values
+        if "Ссылка на контракт" in self._df.columns:
+            return contract_url in self._df["Ссылка на контракт"].values
         return False
 
     async def save_to_yandex(self) -> Optional[str]:
@@ -261,13 +267,11 @@ class YandexExcelManager:
                                     f"📥 Загружен существующий файл: {len(existing_df)} записей"
                                 )
                             else:
-                                # ← НОВОЕ: старый файл с неверными колонками — удаляем
                                 logger.warning(
                                     f"⚠️ Старый файл имеет неверные колонки {set(existing_df.columns)}. "
                                     f"Пересоздаём с правильными: {set(self.COLUMNS)}"
                                 )
                                 existing_df = None
-                                # Удаляем старый файл с Диска
                                 try:
                                     await self.yandex.delete(remote_path)
                                     logger.info(f"🗑️ Старый файл удалён: {remote_path}")
@@ -282,7 +286,7 @@ class YandexExcelManager:
                 if existing_df is not None and not existing_df.empty:
                     combined = pd.concat([existing_df, self._df], ignore_index=True)
                     combined = combined.drop_duplicates(
-                        subset=["Ссылка на отказ"], keep="first"
+                        subset=["Ссылка на контракт"], keep="first"
                     )
                     self._df = combined.copy()
                     logger.info(
@@ -330,14 +334,11 @@ class YandexExcelManager:
 
             import re
 
-            # Пробуем извлечь public_key из разных форматов ссылок
             match = re.search(r"/d/([a-zA-Z0-9_-]+)", long_url)
             if match:
                 public_key = match.group(1)
                 return f"https://yadi.sk/d/{public_key}"
 
-            # Если ссылка вида https://disk.yandex.ru/client/disk/... — это не публичная ссылка
-            # Возвращаем как есть, но логируем предупреждение
             if "disk.yandex.ru/client" in long_url:
                 logger.warning(
                     f"⚠️ Ссылка не публичная (client URL): {long_url[:50]}..."
@@ -349,12 +350,9 @@ class YandexExcelManager:
             logger.error(f"❌ Ошибка преобразования ссылки: {e}")
             return long_url
 
-    # === ТАЙМЕР СОХРАНЕНИЯ ===
-
     def _schedule_timer_save(self):
         """Запускает/перезапускает таймер сохранения на 60 секунд."""
         try:
-            # Отменяем старый таймер
             if self._save_timer is not None:
                 try:
                     self._save_timer.cancel()
@@ -362,15 +360,12 @@ class YandexExcelManager:
                     pass
                 self._save_timer = None
 
-            # Пробуем получить текущий loop
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                # Нет event loop (вызов из потока) — таймер не запустить
                 logger.debug("⏱️ Вызов из потока — таймер не запущен")
                 return
 
-            # Запускаем таймер в текущем loop
             self._save_timer = loop.call_later(
                 self._save_interval_sec,
                 lambda: asyncio.create_task(self._timer_save_callback()),
@@ -395,34 +390,44 @@ class YandexExcelManager:
             if self._check_date_change():
                 logger.info("📅 Новый день! Создан новый Excel и сброшен кэш.")
 
-            contract_number = record.get("Номер контракта", "")
-            reject_url = record.get("Ссылка на отказ", "")
-            is_new = record.get("Новый", "")
-            reject_date = record.get("Дата подписания заказчиком", "")
-            supplier = record.get("Поставщик", "")
-            sent = record.get("Отправлено", "Нет")
+            reestr_number = record.get("Реестровый номер контракта", "")
+            contract_url = record.get("Ссылка на контракт", "")
+            price = record.get("Цена контракта", "")
+            region = record.get("Регион Заказчика", "")
+            customer = record.get("Наименование Заказчика", "")
+            supplier = record.get("Наименование поставщика", "")
+            inn = record.get("ИНН Поставщика", "")
+            phone = record.get("Телефон Поставщика", "")
+            email = record.get("Почта поставщика", "")
+            contract_date = record.get("Дата заключения контракта", "")
+            reject_date = record.get("Дата размещения решения о расторжении", "")
 
-            if not all([contract_number, reject_url, is_new, reject_date]):
+            if not all([reestr_number, contract_url, reject_date]):
                 logger.warning(f"  ⚠️ Не все обязательные поля заполнены")
                 return False
 
             today_str = self.current_date.strftime("%d.%m.%Y")
             if today_str not in reject_date:
-                logger.warning(f"  ⚠️ Дата не совпала! Пропускаем.")
+                logger.warning(f"  ⚠️ Дата отказа не совпала! Пропускаем.")
                 return False
 
-            if self._is_duplicate(reject_url):
-                logger.warning(f"  ⚠️ ДУБЛИКАТ найден: {reject_url[:40]}...")
+            if self._is_duplicate(contract_url):
+                logger.warning(f"  ⚠️ ДУБЛИКАТ найден: {contract_url[:40]}...")
                 return False
 
             new_record = {
                 "№ п/п": None,
-                "Номер контракта": contract_number,
-                "Ссылка на отказ": reject_url,
-                "Новый": is_new,
-                "Дата подписания заказчиком": reject_date,
-                "Поставщик": supplier,
-                "Отправлено": sent,
+                "Реестровый номер контракта": reestr_number,
+                "Ссылка на контракт": contract_url,
+                "Цена контракта": price,
+                "Регион Заказчика": region,
+                "Наименование Заказчика": customer,
+                "Наименование поставщика": supplier,
+                "ИНН Поставщика": inn,
+                "Телефон Поставщика": phone,
+                "Почта поставщика": email,
+                "Дата заключения контракта": contract_date,
+                "Дата размещения решения о расторжении": reject_date,
             }
 
             with self._lock:
@@ -431,14 +436,15 @@ class YandexExcelManager:
                 assigned_number = len(self._df)
 
             logger.info(
-                f"✅ Добавлен отказ №{assigned_number} для контракта {contract_number} ({reject_date}) | "
-                f"Поставщик: {supplier or 'не указан'} | Отправлено: {sent}"
+                f"✅ Добавлен отказ №{assigned_number} | "
+                f"Контракт: {reestr_number} | "
+                f"Заказчик: {customer[:30] if customer else 'не указан'}... | "
+                f"Поставщик: {supplier[:30] if supplier else 'не указан'}... | "
+                f"Email: {email or 'не найден'} | "
+                f"Дата отказа: {reject_date}"
             )
 
-            # Запускаем/перезапускаем таймер сохранения
             self._schedule_timer_save()
-
-            # Уведомления отправляются через UserManager (не здесь)
             return True
 
         except Exception as e:
@@ -450,7 +456,6 @@ class YandexExcelManager:
 
     async def force_save(self) -> Optional[str]:
         """Принудительное немедленное сохранение. Возвращает публичную ссылку."""
-        # Сбрасываем таймер если он активен
         if self._save_timer is not None:
             self._save_timer.cancel()
             self._save_timer = None
@@ -468,15 +473,12 @@ class YandexExcelManager:
             filename = self._get_filename(self.current_date)
 
             count_today = 0
-            if (
-                "Дата подписания заказчиком" in self._df.columns
-                and "Новый" in self._df.columns
-            ):
+            if "Дата размещения решения о расторжении" in self._df.columns:
                 mask = (
-                    self._df["Дата подписания заказчиком"]
+                    self._df["Дата размещения решения о расторжении"]
                     .astype(str)
                     .str.contains(today_str, na=False)
-                ) & (self._df["Новый"] == "Да")
+                )
                 count_today = self._df[mask].shape[0]
 
             return {

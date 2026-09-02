@@ -1,0 +1,42 @@
+[
+  {
+    "email": "test-74stdpz4p@srv1.mail-tester.com",
+    "contract": "2772401520526000585",
+    "supplier": "ООО СтройМонтаж",
+    "template": 0,
+    "success": false,
+    "status": "error",
+    "details": "[WinError 10061] Подключение не установлено, т.к. конечный компьютер отверг запрос на подключение",
+    "template_index": 0
+  },
+  {
+    "email": "kostyan.babushkin@list.ru",
+    "contract": "2525801616326000083",
+    "supplier": "ИП Иванов Иван Иванович",
+    "template": 1,
+    "success": false,
+    "status": "error",
+    "details": "[WinError 10061] Подключение не установлено, т.к. конечный компьютер отверг запрос на подключение",
+    "template_index": 1
+  },
+  {
+    "email": "babushkin20022002@gmail.com",
+    "contract": "2544845215026000003",
+    "supplier": "ООО ТехноПоставка",
+    "template": 2,
+    "success": false,
+    "status": "error",
+    "details": "[WinError 10061] Подключение не установлено, т.к. конечный компьютер отверг запрос на подключение",
+    "template_index": 2
+  },
+  {
+    "email": "Ant1dote7@yandex.ru",
+    "contract": "2010700762626000102",
+    "supplier": "АО РегионСтрой",
+    "template": 0,
+    "success": false,
+    "status": "error",
+    "details": "[WinError 10061] Подключение не установлено, т.к. конечный компьютер отверг запрос на подключение",
+    "template_index": 0
+  }
+]

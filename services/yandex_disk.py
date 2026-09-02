@@ -234,12 +234,21 @@ class YandexDiskService:
         self, local_file: Path, remote_path: str, make_public: bool = True
     ) -> Optional[str]:
         """Загружает файл на Яндекс.Диск и возвращает публичную ссылку.
-        При ошибке 423 (Resource locked) делает до 3 попыток с задержкой."""
+        При ошибке 423 (Resource locked) удаляет старый файл и повторяет."""
 
         # === СОЗДАЁМ ПАПКИ ПЕРЕД ЗАГРУЗКОЙ ===
         folder_path = str(Path(remote_path).parent).replace("\\", "/")
         if folder_path and folder_path != "disk:":
             await self.mkdirs(folder_path)
+
+        # === УДАЛЯЕМ СТАРЫЙ ФАЙЛ, ЕСЛИ СУЩЕСТВУЕТ (чтобы избежать 423) ===
+        if await self.exists(remote_path):
+            try:
+                await _run_sync(self.client.remove, remote_path)
+                logger.info(f"🗑️ Старый файл удалён перед загрузкой: {remote_path}")
+                await asyncio.sleep(1)  # Пауза на освобождение блокировки
+            except Exception as e:
+                logger.warning(f"⚠️ Не удалось удалить старый файл: {e}")
 
         # === ЗАГРУЗКА С RETRY ===
         upload_success = False
@@ -272,6 +281,7 @@ class YandexDiskService:
                 else:
                     logger.error(f"❌ Ошибка загрузки файла: {e}")
                     return None
+
 
         if not upload_success:
             return None
