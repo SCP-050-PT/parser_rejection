@@ -1,42 +1,15 @@
 """
+utils.py
 Утилиты для парсера отказов.
 VK версия — убраны Telegram-зависимости.
+ИСПРАВЛЕНИЕ v6.3: Убрана ротация UA (не используется)
 """
 
-import random
 import asyncio
 from threading import Lock
 from datetime import datetime
 from typing import Dict, Any, Optional
 from loguru import logger
-
-# === РОТАЦИЯ USER-AGENT ===
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
-]
-
-
-def get_random_user_agent() -> str:
-    return random.choice(USER_AGENTS)
-
-
-def get_platform_from_ua(user_agent: str) -> str:
-    if "Windows" in user_agent:
-        return "Windows"
-    elif "Macintosh" in user_agent:
-        return "macOS"
-    elif "Linux" in user_agent:
-        return "Linux"
-    return "Windows"
 
 
 class DailyStats:

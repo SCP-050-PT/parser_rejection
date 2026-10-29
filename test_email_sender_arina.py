@@ -1,7 +1,7 @@
 """
-test_email_sender_arina.py — тестовый скрипт v5.0
-Свой SMTP (127.0.0.1:25, без SSL/auth)
-1 шаблон на 1 адрес (4 письма)
+test_email_sender_arina.py — универсальный тестовый скрипт v6.1
+Поддерживает переключение каналов через ACTIVE_CHANNEL в .env
+ИСПРАВЛЕНО: Убрана жёсткая привязка к POSTFIX_*, добавлены fallback'и
 """
 
 import sys
@@ -13,21 +13,80 @@ import json
 import time
 import random
 import smtplib
+import ssl
 from datetime import datetime
 from pathlib import Path
 from email.mime.text import MIMEText
-from email.utils import formatdate, make_msgid
+from email.utils import formatdate, make_msgid, formataddr
+from dotenv import load_dotenv
 
 from loguru import logger
 
+# Загружаем переменные окружения
+for path in [".env", "../.env", "/opt/zakupki-rejections/.env"]:
+    if os.path.exists(path):
+        load_dotenv(path)
+        break
+
 # =============================================================================
-# КОНФИГУРАЦИЯ
+# АВТОМАТИЧЕСКАЯ ЗАГРУЗКА КОНФИГА ПО АКТИВНОМУ КАНАЛУ
 # =============================================================================
 
-# 4 адреса, 4 письма (по одному шаблону на адрес)
+
+def get_channel_config():
+    """Возвращает конфиг в зависимости от ACTIVE_CHANNEL"""
+    channel = os.environ.get("ACTIVE_CHANNEL", "smtp").lower().strip()
+
+    # ✅ ИСПРАВЛЕНО: Убрана жёсткая привязка к префиксам, используем SMTP_* как базовые
+    if channel == "timeweb":
+        # Для Timeweb используем отдельные переменные если есть, иначе SMTP_*
+        host = os.environ.get("TIMEWEB_HOST", os.environ.get("SMTP_HOST", "127.0.0.1"))
+        port = int(os.environ.get("TIMEWEB_PORT", os.environ.get("SMTP_PORT", "25")))
+        user = os.environ.get("TIMEWEB_LOGIN", os.environ.get("SMTP_LOGIN", ""))
+        password = os.environ.get(
+            "TIMEWEB_PASSWORD", os.environ.get("SMTP_PASSWORD", "")
+        )
+        from_email = os.environ.get(
+            "TIMEWEB_FROM_EMAIL",
+            os.environ.get("FROM_EMAIL", "tender-info@rnp-help.ru"),
+        )
+        domain = os.environ.get(
+            "TIMEWEB_DOMAIN", os.environ.get("DOMAIN", "rnp-help.ru")
+        )
+        logger.info(f" Тестовый режим: TIMEWEB ({domain})")
+    else:
+        # По умолчанию используем SMTP_* переменные
+        host = os.environ.get("SMTP_HOST", "127.0.0.1")
+        port = int(os.environ.get("SMTP_PORT", "25"))
+        user = os.environ.get("SMTP_LOGIN", "")
+        password = os.environ.get("SMTP_PASSWORD", "")
+        from_email = os.environ.get("FROM_EMAIL", "tender-info@rnp-help.ru")
+        domain = os.environ.get("DOMAIN", "rnp-help.ru")
+        logger.info(f" Тестовый режим: SMTP ({domain})")
+
+    return {
+        "CHANNEL": channel,
+        "HOST": host,
+        "PORT": port,
+        "USER": user,
+        "PASS": password,
+        "FROM_NAME": os.environ.get("FROM_NAME", "Арина Еремян"),
+        "FROM_EMAIL": from_email,
+        "BOUNCE_EMAIL": os.environ.get("BOUNCE_EMAIL", from_email),
+        "REPLY_TO": os.environ.get("REPLY_TO", from_email),
+        "DOMAIN": domain,
+    }
+
+
+CFG = get_channel_config()
+
+# =============================================================================
+# ТЕСТОВЫЕ ПОЛУЧАТЕЛИ
+# =============================================================================
+
 TEST_RECIPIENTS = [
     {
-        "email": "test-74stdpz4p@srv1.mail-tester.com",
+        "email": "babushkin.kostyan@inbox.ru",
         "contract": "2772401520526000585",
         "supplier": "ООО СтройМонтаж",
         "template": 0,
@@ -52,73 +111,85 @@ TEST_RECIPIENTS = [
     },
 ]
 
-# SMTP — свой сервер (Postfix на localhost)
-SMTP_HOST = "127.0.0.1"
-SMTP_PORT = 25
-SMTP_LOGIN = None  # Без авторизации на localhost
-SMTP_PASSWORD = None  # Без авторизации
-
-FROM_NAME = "Arina Eremyan"
-FROM_EMAIL = "lawyer@rnp-help.ru"
-REPLY_TO = "lawyer@rnp-help.ru"
-DOMAIN = "rnp-help.ru"
-
-logger.info(f"📡 SMTP: {SMTP_HOST}:{SMTP_PORT} (локальный Postfix)")
-logger.info(f"📤 From: {FROM_NAME} <{FROM_EMAIL}>")
+logger.info(f" SMTP: {CFG['HOST']}:{CFG['PORT']}")
+logger.info(f" From: {CFG['FROM_NAME']} <{CFG['FROM_EMAIL']}>")
+logger.info(f" Bounce: {CFG['BOUNCE_EMAIL']}")
 
 # =============================================================================
-# ШАБЛОНЫ (русский текст, темы на латинице)
+# ШАБЛОНЫ ПИСЕМ
 # =============================================================================
 
 EMAIL_SUBJECTS = [
-    "Vopros po dogovoru No.{{contract_number}}",
-    "Informacija o rastorzhenii dogovora No.{{contract_number}}",
-    "Konsultacija po zashchite ot RNP, dogovor No.{{contract_number}}",
+    "Информация по контракту №{{contract_number}}",
+    "Документы по договору №{{contract_number}}",
+    "Уведомление по контракту №{{contract_number}}",
 ]
 
 EMAIL_TEMPLATES = [
-    # --- Шаблон 0: Мягкий, деловой ---
-    """Здравствуйте, {{supplier_name}}!
+    """Здравствуйте!
 
-Меня зовут Арина Еремян, я юрист в сфере госзакупок. Увидела информацию о вашем контракте № {{contract_number}} на портале zakupki.gov.ru.
+По вашему контракту №{{contract_number}} на портале госзакупок размещена информация, требующая внимания. Сроки для реагирования ограничены, поэтому пишу вам напрямую.
 
-Если у вас возникли вопросы по процедуре или нужна помощь в подготовке документов — буду рада помочь. Первичная консультация бесплатная, без обязательств.
+Меня зовут Арина Еремян, я юрист в сфере госзакупок. Более 5 лет помогаю поставщикам обжаловать решения о расторжении и избегать попадания в РНП.
 
-Связаться со мной:
-• Телефон: +7 (928) 252-01-01
-• Telegram: @arina_eaa
-• Email: lawyer@rnp-help.ru
+Что предлагаю прямо сейчас:
+• Бесплатная первичная консультация - оценю вашу ситуацию и перспективы.
+• Индивидуальный план действий с указанием сроков.
+• Полное сопровождение: от подготовки документов до взаимодействия с ФАС.
+• Работа до результата, без передачи дела другим специалистам.
 
-С уважением,
-Еремян Арина Арнольдовна
-Юрист в сфере госзакупок""",
-    # --- Шаблон 1: С акцентом на сроки ---
-    """Здравствуйте, {{supplier_name}}!
+Если сейчас не готовы обсуждать детали - напишите «позже». Но не откладывайте: пропуск срока без уважительных причин делает обжалование практически невозможным.
 
-Пишу вам по поводу контракта № {{contract_number}}, размещённого на zakupki.gov.ru.
-
-Специализируюсь на сопровождении поставщиков в спорах по 44-ФЗ и 223-ФЗ. Помогаю с подготовкой возражений, представлением интересов в ФАС и защитой от включения в реестр.
-
-Условия работы:
-• Первый этап: 20 000 руб. (подготовка документов, анализ)
-• Второй этап: 30 000 руб. (только после положительного результата)
-
-Сроки на подачу документов ограничены. Если интересно — ответьте на это письмо или позвоните: +7 (928) 252-01-01.
+Для консультации просто ответьте на это письмо или свяжитесь со мной.
 
 С уважением,
 Еремян Арина Арнольдовна
 Юрист в сфере госзакупок
+Мобильный телефон: +7 (928) 252-01-01
 Telegram: @arina_eaa""",
-    # --- Шаблон 2: Короткий ---
-    """Здравствуйте, {{supplier_name}}!
+    """По контракту №{{contract_number}} на портале госзакупок размещена информация, требующая внимания. Сроки для реагирования ограничены, поэтому связываюсь с вами напрямую.
 
-По контракту № {{contract_number}} у вас есть возможность обжаловать решение заказчика. Сроки ограничены.
+Меня зовут Арина Еремян, я юрист по госзакупкам. Более 5 лет занимаюсь защитой поставщиков при расторжении контрактов и предотвращением включения в РНП.
 
-Я — Арина Еремян, юрист по госзакупкам. Помогаю поставщикам защитить свои интересы.
+Могу помочь на всех этапах:
+• бесплатно оценю вашу ситуацию и перспективы;
+• разработаю индивидуальный план действий;
+• подготовлю необходимые документы;
+• представлю ваши интересы при взаимодействии с ФАС;
+• лично буду сопровождать дело до результата.
 
-Бесплатная консультация: +7 (928) 252-01-01 или @arina_eaa в Telegram.
+Если пока не готовы обсуждать детали — ответьте «позже». Но не затягивайте с решением: пропуск срока без уважительных причин может значительно осложнить обжалование.
 
-lawyer@rnp-help.ru""",
+С уважением,
+Еремян Арина Арнольдовна
+Юрист в сфере госзакупок
+Мобильный телефон: +7 (928) 252-01-01
+Telegram: @arina_eaa""",
+    """Здравствуйте!
+
+На официальном сайте портале госзакупок опубликовано решение об одностороннем отказе от исполнения контракта №{{contract_number}}.
+
+Меня зовут Арина Еремян, я юрист в сфере госзакупок. Специализируюсь на защите поставщиков от попадания в реестр недобросовестных поставщиков и сопровождении споров по 44-ФЗ и 223-ФЗ более 5 лет.
+
+Чем могу помочь:
+• Бесплатная первичная консультация — разберу вашу ситуацию и оценю перспективы.
+• Подробный план действий с указанием сроков и документов.
+• Полное юридическое сопровождение: подготовка документов, взаимодействие с ФАС и Заказчиком.
+• Персональное ведение дела без передачи другим специалистам.
+
+Условия:
+• Аванс: 20 000 руб. — анализ контракта и подготовка документов.
+• Оплата после результата: 30 000 руб. — только после положительного результата.
+
+Важно: сроки для подачи возражений ограничены (обычно 10 рабочих дней с момента размещения решения в ЕИС). Пропуск срока без уважительных причин делает обжалование практически невозможным.
+
+Для консультации ответьте на это письмо или свяжитесь со мной напрямую.
+
+С уважением,
+Еремян Арина Арнольдовна
+Юрист в сфере гос.закупок
+Мобильный телефон: +7 (928) 252-01-01
+Telegram: @arina_eaa""",
 ]
 
 
@@ -129,44 +200,58 @@ def render(tpl: str, contract: str = "", supplier: str = "") -> str:
 
 
 # =============================================================================
-# ОТПРАВКА ЧЕРЕЗ ЛОКАЛЬНЫЙ POSTFIX (127.0.0.1:25)
+# ОТПРАВКА ПИСЬМА
 # =============================================================================
 
 
 def send_email(
-    to_email: str,
-    subject: str,
-    body: str,
-    contract: str,
-    tidx: int,
-    supplier: str = "",
+    to_email: str, subject: str, body: str, contract: str, tidx: int, supplier: str = ""
 ) -> dict:
-    logger.info(f"📧 [REAL] -> {to_email} | contract {contract} | template #{tidx+1}")
+    logger.info(
+        f" [{CFG['CHANNEL'].upper()}] -> {to_email} | contract {contract} | template #{tidx+1}"
+    )
 
     msg = MIMEText(body, "plain", "utf-8")
     msg["Subject"] = subject
-    msg["From"] = f"{FROM_NAME} <{FROM_EMAIL}>"
+    msg["From"] = formataddr((CFG["FROM_NAME"], CFG["FROM_EMAIL"]))
     msg["To"] = to_email.strip().lower()
     msg["Date"] = formatdate(localtime=True)
-    msg["Message-ID"] = make_msgid(domain=DOMAIN)
-    msg["Reply-To"] = REPLY_TO
+
+    # Message-ID соответствует домену
+    msg["Message-ID"] = make_msgid(domain=CFG["DOMAIN"])
+    msg["Reply-To"] = CFG["REPLY_TO"]
+
+    # List-Unsubscribe динамический под текущий домен
+    msg["List-Unsubscribe"] = f"<mailto:unsubscribe@{CFG['DOMAIN']}>"
+    msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+    msg["Feedback-ID"] = f"{CFG['DOMAIN']}:contract:{contract}"
+    msg["X-Mailer"] = f"RNP-Help Test Mailer v6.1 ({CFG['CHANNEL']})"
 
     try:
-        # Локальный Postfix: без SSL, без авторизации
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=30) as srv:
-            # Без srv.login() — localhost не требует auth
-            srv.sendmail(FROM_EMAIL, [to_email], msg.as_string())
+        # Локальный Postfix без SSL
+        if CFG["HOST"] in ("127.0.0.1", "localhost"):
+            with smtplib.SMTP(CFG["HOST"], CFG["PORT"], timeout=30) as srv:
+                srv.sendmail(CFG["BOUNCE_EMAIL"], [to_email], msg.as_string())
+        else:
+            # Внешний SMTP с SSL
+            context = ssl.create_default_context()
+            with smtplib.SMTP_SSL(
+                CFG["HOST"], CFG["PORT"], context=context, timeout=30
+            ) as srv:
+                if CFG["USER"] and CFG["PASS"]:
+                    srv.login(CFG["USER"], CFG["PASS"])
+                srv.sendmail(CFG["FROM_EMAIL"], [to_email], msg.as_string())
 
-        logger.info(f"✅ OK: {to_email}")
+        logger.info(f" OK: {to_email}")
         return {
             "success": True,
             "status": "sent",
             "template_index": tidx,
-            "from": msg["From"],
             "message_id": msg["Message-ID"],
         }
+
     except Exception as e:
-        logger.error(f"❌ FAIL: {to_email} — {e}")
+        logger.error(f" FAIL: {to_email} — {e}")
         return {
             "success": False,
             "status": "error",
@@ -202,7 +287,7 @@ def get_delay(email: str) -> float:
 
 def main():
     logger.info("=" * 60)
-    logger.info("🧪 TEST v5.0 — ЛОКАЛЬНЫЙ POSTFIX (127.0.0.1:25)")
+    logger.info(f" TEST v6.1 — КАНАЛ: {CFG['CHANNEL'].upper()}")
     logger.info("=" * 60)
 
     results = []
@@ -213,10 +298,9 @@ def main():
 
         logger.info(f"--- {i+1}/{len(TEST_RECIPIENTS)}: {rec['email']} ---")
         logger.info(f"   Шаблон: #{tidx+1} | Контракт: {rec['contract']}")
-        logger.info(f"   Поставщик: {rec['supplier']}")
 
         delay = get_delay(rec["email"])
-        logger.info(f"⏳ Задержка {delay:.1f}с...")
+        logger.info(f" Задержка {delay:.1f}с...")
         time.sleep(delay)
 
         result = send_email(
@@ -227,21 +311,18 @@ def main():
             tidx=tidx,
             supplier=rec["supplier"],
         )
-
         results.append({**rec, **result})
 
         if i < len(TEST_RECIPIENTS) - 1:
             pause = random.uniform(10, 20)
-            logger.info(f"⏳ Пауза {pause:.1f}с...")
+            logger.info(f" Пауза {pause:.1f}с...")
             time.sleep(pause)
 
-    # Сохраняем результаты
     Path("data").mkdir(exist_ok=True)
-    with open("data/test_send_results_v5.json", "w", encoding="utf-8") as f:
+    with open("data/test_send_results_v61.json", "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
 
     logger.info("=" * 60)
-    logger.info("📊 RESULTS:")
     sent = sum(1 for r in results if r.get("success"))
     failed = sum(1 for r in results if not r.get("success"))
     logger.info(f"  Total: {len(TEST_RECIPIENTS)} | Sent: {sent} | Failed: {failed}")
@@ -249,17 +330,6 @@ def main():
         status = "✅" if r.get("success") else "❌"
         logger.info(f"  {status} {r['email']} | template #{r['template']+1}")
     logger.info("=" * 60)
-
-    # Показываем отправленные письма
-    logger.info("")
-    logger.info("📧 ОТПРАВЛЕННЫЕ ПИСЬМА:")
-    for r in results:
-        if r.get("success"):
-            logger.info(f"\n--- {r['email']} ---")
-            logger.info(f"Тема: {render(EMAIL_SUBJECTS[r['template']], r['contract'])}")
-            logger.info("-" * 40)
-            text = render(EMAIL_TEMPLATES[r["template"]], r["contract"], r["supplier"])
-            logger.info(text[:500] + "..." if len(text) > 500 else text)
 
 
 if __name__ == "__main__":

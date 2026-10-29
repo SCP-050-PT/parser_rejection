@@ -2,7 +2,8 @@
 """
 Управление парсингом отказов и уведомлениями (VK версия).
 Версия: Автоматический режим, только админ парсит.
-Добавлено: информация о письме поставщику в уведомлениях.
+ИСПРАВЛЕНО: Ссылка на отчет теперь берется из результата парсера,
+а не генерируется повторно (что ломало ссылку для VK).
 """
 
 import asyncio
@@ -40,6 +41,9 @@ class UserManager:
         self._last_run_time: Optional[datetime] = None
         self._parsing_task: Optional[asyncio.Task] = None
         self._notification_task: Optional[asyncio.Task] = None
+        self._reject_seq_today: int = 0
+        self._reject_seq_date: Optional[str] = None  # "25.09.2026"
+        self._reject_seq_lock = asyncio.Lock()
 
     def __del__(self):
         if hasattr(self, "_executor"):
@@ -69,7 +73,17 @@ class UserManager:
             self._notification_task = asyncio.create_task(
                 self._process_notification_queue()
             )
-            logger.info("🔔 Процессор уведомлений об отказах запущен")
+            logger.info(" Процессор уведомлений об отказах запущен")
+
+    async def _next_reject_seq(self) -> int:
+        """№ отказа за сегодня (сброс при смене даты)."""
+        today = datetime.now().strftime("%d.%m.%Y")
+        async with self._reject_seq_lock:
+            if self._reject_seq_date != today:
+                self._reject_seq_date = today
+                self._reject_seq_today = 0
+            self._reject_seq_today += 1
+            return self._reject_seq_today
 
     async def _process_notification_queue(self):
         """Обрабатывает очередь уведомлений об отказах из потока парсера"""
@@ -82,67 +96,98 @@ class UserManager:
                 contract_number = notification["contract_number"]
                 reject_url = notification["reject_url"]
                 reject_date = notification["reject_date"]
+                registry_placed = notification.get("registry_placed", "")
+                registry_updated = notification.get("registry_updated", "")
                 admin_chat_id = notification["admin_chat_id"]
                 supplier_name = notification.get("supplier_name", "")
                 email = notification.get("email", "")
                 email_sent = notification.get("email_sent", False)
                 email_status = notification.get("email_status", "")
 
-                # Формируем сообщение об отказе
+                # опциональные поля из processing
+                contract_date = notification.get("contract_date", "")
+                customer_name = notification.get("customer_name", "")
+                price = notification.get("price", "")
+                region = notification.get("region", "")
+                reestr_number = notification.get(
+                    "reestr_number", contract_number
+                )
+
+                seq = await self._next_reject_seq()
+                today_str = datetime.now().strftime("%d.%m.%Y")
+
                 message_lines = [
-                    f"🚫 НОВЫЙ ОТКАЗ ОТ ЗАКЛЮЧЕНИЯ ДОГОВОРА!\n",
-                    f"📋 Номер контракта: {contract_number}",
+                    f"🚫 НОВЫЙ ОТКАЗ №{seq} ({today_str})!\n",
+                    f"Номер контракта: {contract_number}",
                     f"📅 Дата отказа: {reject_date}",
                 ]
-
-                # Добавляем информацию о поставщике
+                if registry_placed:
+                    message_lines.append(f"📌 Размещен в реестре: {registry_placed}")
+                if registry_updated:
+                    message_lines.append(f"🔄 Обновлен в реестре: {registry_updated}")
+                if contract_date:
+                    message_lines.append(
+                        f"📋 Дата заключения контракта: {contract_date}"
+                    )
+                if customer_name:
+                    message_lines.append(f"🏛 Заказчик: {customer_name[:70]}")
                 if supplier_name:
                     message_lines.append(f"🏢 Поставщик: {supplier_name[:60]}")
+                if price:
+                    message_lines.append(f"💰 Цена: {price}")
+                if region:
+                    message_lines.append(f"📍 Регион: {region[:40]}")
 
-                # Добавляем информацию о письме
                 if email:
                     if email_sent:
                         message_lines.append(f"📧 Письмо отправлено: {email}")
+                    elif email_status == "already_sent":
+                        message_lines.append(
+                            f"⏭ Письмо уже отправлялось ранее: {email}"
+                        )
+                    elif email_status == "no_email":
+                        message_lines.append("⚠️ Email не найден")
+                    elif email_status == "disabled":
+                        message_lines.append("⏭ Отправка писем отключена")
+                    elif email_status == "queued":
+                        message_lines.append(f"✉️ Письмо в очереди: {email}")
                     else:
-                        if email_status == "already_sent":
-                            message_lines.append(
-                                f"⏭ Письмо уже отправлялось ранее: {email}"
-                            )
-                        elif email_status == "no_email":
-                            message_lines.append(f"⚠️ Email не найден")
-                        elif email_status == "disabled":
-                            message_lines.append(f"⏭ Отправка писем отключена")
-                        else:
-                            message_lines.append(
-                                f"❌ Письмо не отправлено: {email_status}"
-                            )
+                        message_lines.append(
+                            f"❌ Письмо не отправлено: {email_status}"
+                        )
+                else:
+                    message_lines.append("⚠️ Email не найден")
 
-                message_lines.extend(
-                    [f"\n🔗 Ссылка: {reject_url}", f"\n#отказ #закупки"]
-                )
+                message_lines.append(f"\n🔗 Отказ: {reject_url}")
+                if reestr_number:
+                    card_url = (
+                        "https://zakupki.gov.ru/epz/contract/contractCard/"
+                        f"common-info.html?reestrNumber={reestr_number}"
+                    )
+                    message_lines.append(f"📄 Контракт: {card_url}")
 
+                message_lines.append("\n#отказ #закупки")
                 message = "\n".join(message_lines)
 
-                # Отправляем админу
+                # админ
                 try:
                     await self.send_message(int(admin_chat_id), message)
                     logger.info(
-                        f"✅ Моментальное уведомление админу: {contract_number}"
+                        f"✅ Моментальное уведомление админу №{seq}: {contract_number}"
                     )
                 except Exception as e:
                     logger.error(f"❌ Ошибка отправки админу: {e}")
 
-                # Отправляем активным пользователям
+                # активные пользователи
                 users = user_db.get_active_users()
                 for user in users:
                     chat_id = user.get("chat_id")
                     if not chat_id or str(chat_id) == str(admin_chat_id):
                         continue
-
                     try:
                         await self.send_message(int(chat_id), message)
                         logger.info(
-                            f"✅ Моментальное уведомление {chat_id}: {contract_number}"
+                            f"✅ Уведомление {chat_id} №{seq}: {contract_number}"
                         )
                     except Exception as e:
                         logger.error(f"❌ Ошибка отправки {chat_id}: {e}")
@@ -200,8 +245,13 @@ class UserManager:
             total_processed += result.get("processed", 0)
             total_errors += result.get("errors", 0)
             total_new_this_session += result.get("new_this_session", 0)
+
+            # Берем ссылку из результата парсера (она уже рабочая)
             if result.get("public_url"):
                 public_url = result["public_url"]
+                logger.info(f"✅ Получена рабочая ссылка для отчета: {public_url}")
+                from bot.handlers import set_last_public_url
+                set_last_public_url(public_url)
         except Exception as e:
             logger.error(f"❌ Ошибка парсинга для админа: {e}")
             total_errors += 1
@@ -222,6 +272,10 @@ class UserManager:
                         f"📁 Отчёт на Яндекс.Диске:\n🔗 {public_url}"
                     )
                     await self.send_message(int(chat_id), message)
+                else:
+                    logger.warning(
+                        f"⚠️ Нет публичной ссылки для пользователя {chat_id}"
+                    )
             except Exception as e:
                 logger.error(f"❌ Ошибка уведомления пользователю {chat_id}: {e}")
 
@@ -304,6 +358,9 @@ class UserManager:
         old_stats = excel_manager.get_stats()
         old_count = old_stats.get("total", 0)
 
+        # ИСПРАВЛЕНИЕ: Берем ссылку напрямую из результата парсера,
+        # так как run_parallel() уже вызывает force_save() внутри себя.
+        # Повторный вызов force_save() здесь ломал ссылку.
         public_url = None
 
         try:
@@ -313,26 +370,19 @@ class UserManager:
                 admin_vk_id=settings.admin_vk_id,
             )
 
+            # run_parallel() сам сохраняет файл и возвращает excel_url
             result = parser.run_parallel(
                 max_pages=settings.max_parse_pages_rejections,
                 max_workers=settings.max_workers_rejections,
             )
 
-            logger.info(f"💾 Сохраняем данные на Яндекс.Диск для {chat_id}...")
+            # ИЗВЛЕКАЕМ ССЫЛКУ ИЗ РЕЗУЛЬТАТА ПАРСЕРА
+            public_url = result.get("excel_url")
 
-            try:
-                with concurrent.futures.ThreadPoolExecutor(
-                    max_workers=1
-                ) as save_executor:
-                    future = save_executor.submit(
-                        lambda: thread_asyncio.run(excel_manager.force_save())
-                    )
-                    public_url = future.result(timeout=30)
-
-                if public_url:
-                    logger.info(f"🔗 Получена публичная ссылка: {public_url}")
-            except Exception as e:
-                logger.error(f"❌ Ошибка сохранения: {e}")
+            if public_url:
+                logger.info(f"🔗 Использована ссылка из парсера: {public_url}")
+            else:
+                logger.warning("⚠️ Парсер не вернул ссылку (excel_url=None)")
 
             new_stats = excel_manager.get_stats()
             new_count = new_stats.get("total", 0)
@@ -371,8 +421,10 @@ class UserManager:
                         lambda: thread_asyncio.run(excel_manager.close())
                     )
                     close_url = future.result(timeout=10)
+                    # Используем close_url только если у нас еще нет рабочей ссылки
                     if close_url and not public_url:
                         public_url = close_url
+                        logger.info(f" Использована ссылка из close(): {public_url}")
             except Exception as e:
                 logger.error(f"❌ Ошибка при закрытии ExcelManager: {e}")
             finally:

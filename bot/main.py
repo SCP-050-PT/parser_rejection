@@ -2,6 +2,7 @@
 """
 Точка входа для VK бота парсера отказов.
 Версия: Гибкий автопарсинг — 4 минуты пауза после завершения парсинга.
+ИСПРАВЛЕНО: Добавлена клавиатура для обычных пользователей в /start
 """
 
 import asyncio
@@ -69,7 +70,7 @@ def setup_logging():
         backtrace=True,
         diagnose=True,
     )
-    logger.info("📋 Логирование настроено")
+    logger.info(" Логирование настроено")
 
 
 # ============================================================================
@@ -168,7 +169,7 @@ async def start_handler(message: Message):
         elif existing.get("status") != "active":
             user_db.approve_user(user_id, admin_id=ADMIN_VK_ID)
 
-        # Админ-панель
+        # Админ-панель (inline клавиатура)
         keyboard = (
             VKKeyboard(inline=True)
             .add(
@@ -216,7 +217,7 @@ async def start_handler(message: Message):
         await notify_admin(
             f"📩 Новая заявка!\n\n"
             f"👤 ID: {user_id}\n"
-            f"📝 Имя: {first_name} {last_name}\n"
+            f" Имя: {first_name} {last_name}\n"
             f"🔗 VK: @id{user_id}\n\n"
             f"Для одобрения: /approve_{user_id}\n"
             f"Для отклонения: /reject_{user_id}"
@@ -224,7 +225,7 @@ async def start_handler(message: Message):
 
         await message.answer(
             message=(
-                f"👋 Привет, {first_name}!\n\n"
+                f" Привет, {first_name}!\n\n"
                 f"⏳ Ваша заявка на доступ отправлена администратору.\n"
                 f"Ожидайте одобрения — вы получите уведомление."
             )
@@ -244,13 +245,20 @@ async def start_handler(message: Message):
         await message.answer(message="❌ Ваша заявка была отклонена. Доступ запрещён.")
         return
 
+    # ИСПРАВЛЕНИЕ: Добавляем клавиатуру для активных пользователей
     if existing.get("status") == "active":
+        from bot.keyboards import get_main_menu
+
+        # Генерируем обычную клавиатуру (не inline)
+        user_keyboard = get_main_menu(is_admin=False)
+
         await message.answer(
             message=(
-                f"👋 С возвращением, {first_name}!\n\n"
+                f" С возвращением, {first_name}!\n\n"
                 f"✅ Вы подключены к уведомлениям.\n"
                 f"Как только найдутся новые отказы — вы получите сообщение."
-            )
+            ),
+            keyboard=user_keyboard,
         )
         return
 
@@ -259,7 +267,7 @@ async def admin_handler(message: Message):
     """Обработка админ-команд и кнопок"""
     user_id = message.from_id
     if user_id != ADMIN_VK_ID:
-        await message.answer(message="❌ У вас нет доступа к админ-панели.")
+        await message.answer(message=" У вас нет доступа к админ-панели.")
         return
 
     text = (message.text or "").lower()
@@ -373,7 +381,7 @@ async def approve_reject_handler(message: Message):
             target_id = int(text.split("_")[1])
         except (IndexError, ValueError):
             await message.answer(
-                message="❌ Неверный формат. Используйте: /approve_123456"
+                message=" Неверный формат. Используйте: /approve_123456"
             )
             return
 
@@ -407,7 +415,7 @@ async def approve_reject_handler(message: Message):
             logger.info(f"❌ Админ отклонил пользователя {target_id}")
         else:
             await message.answer(
-                message=f"❌ Не удалось отклонить пользователя {target_id}."
+                message=f" Не удалось отклонить пользователя {target_id}."
             )
 
     elif text.startswith("/delete_"):
@@ -415,7 +423,7 @@ async def approve_reject_handler(message: Message):
             target_id = int(text.split("_")[1])
         except (IndexError, ValueError):
             await message.answer(
-                message="❌ Неверный формат. Используйте: /delete_123456"
+                message=" Неверный формат. Используйте: /delete_123456"
             )
             return
 
@@ -509,7 +517,7 @@ async def auto_parse_job():
             logger.warning("⚠️ [AUTO] Задача парсинга была отменена")
 
         except Exception as e:
-            logger.error(f"❌ [AUTO] Критическая ошибка: {e}", exc_info=True)
+            logger.error(f" [AUTO] Критическая ошибка: {e}", exc_info=True)
             _last_successful_run = datetime.now()
 
         finally:
@@ -557,7 +565,6 @@ async def init_services():
         manager = get_user_manager()
         if manager:
             await manager.start_notification_processor()
-            logger.info("🔔 Процессор уведомлений об отказах запущен")
 
     except Exception as e:
         logger.error(f"❌ Ошибка инициализации UserManager: {e}", exc_info=True)
@@ -579,7 +586,7 @@ async def init_services():
 async def shutdown():
     """Корректное завершение работы"""
     global _parse_task
-    logger.info("🛑 Завершение работы...")
+    logger.info(" Завершение работы...")
 
     # Останавливаем процессор уведомлений
     try:
@@ -663,4 +670,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"💥 Критическая ошибка: {e}", exc_info=True)
     finally:
-        logger.info("👋 Завершение работы")
+        logger.info(" Завершение работы")

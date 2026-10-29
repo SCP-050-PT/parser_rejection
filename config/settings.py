@@ -1,6 +1,8 @@
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from pydantic import Field
+import json
+from typing import List, Dict, Any, Optional
 
 BASE_DIR = Path(__file__).parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -43,6 +45,21 @@ class Settings(BaseSettings):
     )
     search_page_batch_size: int = Field(default=20, alias="SEARCH_PAGE_BATCH_SIZE")
     records_per_page: str = Field(default="50", alias="RECORDS_PER_PAGE")
+
+    multi_ip_config_json: str = Field(default="[]", alias="MULTI_IP_CONFIG_JSON")
+    ip_ban_duration_seconds: int = Field(default=900, alias="IP_BAN_DURATION_SECONDS")
+    proxy_request_timeout: int = Field(default=45, alias="PROXY_REQUEST_TIMEOUT")
+    local_request_timeout: int = Field(default=30, alias="LOCAL_REQUEST_TIMEOUT")
+
+    @property
+    def multi_ip_config(self) -> List[Dict[str, Any]]:
+        try:
+            data = json.loads(self.multi_ip_config_json)
+            if not isinstance(data, list):
+                return []
+            return data
+        except Exception:
+            return []
 
     # === SMTP — отправка писем поставщикам при отказе (Арина Еремян, rnp-help.ru) ===
     smtp_host: str = Field(default="smtp.timeweb.ru", alias="SMTP_HOST")

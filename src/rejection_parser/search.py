@@ -1,111 +1,105 @@
 """
+search.py
 Поиск и генерация окон для парсера отказов.
-VK версия.
+VK версия v7.7 Adapted for Arina.
+FIX: _check_records → None при ошибке; один _split_window_recursive; старые→новые.
 """
 
 import random
 import time
-import concurrent.futures
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
-from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Tuple, Any, Generator
+import re
 from collections import deque
+from threading import Lock
+from datetime import datetime, timedelta, date
+from typing import List, Dict, Optional, Tuple, Any, Generator
 from urllib.parse import urlencode
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from loguru import logger
 from config.settings import settings
 from bs4 import BeautifulSoup
-import re
 
-from src.rejection_parser.utils import get_random_user_agent, get_platform_from_ua
-from config.settings import settings
-
-# === ИМПОРТ CURL_CFFI ===
-try:
-    from curl_cffi import requests as curl_requests
-    HAS_CURL_CFFI = True
-except ImportError:
-    import requests as curl_requests
-    HAS_CURL_CFFI = False
+BROWSER_PROFILES = [
+    {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Chromium";v="131", "Google Chrome";v="131", "Not?A_Brand";v="24"',
+        "platform": '"Windows"',
+        "lang": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+    },
+    {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "sec_ch_ua": '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        "platform": '"Windows"',
+        "lang": "ru-RU,ru;q=0.9",
+    },
+]
 
 
 class SearchManager:
-    """Управление поиском: окна, URL, запросы, дробление"""
-
     BASE_SEARCH_URL = "https://zakupki.gov.ru/epz/contract/search/results.html"
-
-    MAX_RECORDS_PER_WINDOW = 5000
+    MAX_RECORDS_PER_WINDOW = 4800
     DEFAULT_PRICE_FROM = 100_000
-    MAX_PRICE_TO = 1_000_000_000
+    MAX_PRICE_TO = None
     MIN_PRICE_RANGE = 1000
+    START_DATE = date(2026, 2, 1)
 
     def __init__(self, session_manager, records_cache: Dict, lock: Lock):
         self.session_manager = session_manager
         self._records_cache = records_cache
         self._lock = lock
-        self._consecutive_429 = 0
-        self._base_delay = 5
+        self._request_counter = 0
 
-    def _calculate_delay(self) -> float:
-        if self._consecutive_429 > 0:
-            delay = self._base_delay * (2 ** (self._consecutive_429 - 1))
-            delay = min(delay, 300)
-            logger.warning(f"⏳ Backoff: {delay}с (429 подряд: {self._consecutive_429})")
-            return delay
-        return random.uniform(
-            getattr(settings, "delay_between_pages_min", 0.05),
-            getattr(settings, "delay_between_pages_max", 0.15),
+    def _make_request_with_ip(
+        self,
+        url: str,
+        timeout: int = 30,
+        max_retries: int = 5,
+        target_ip: Optional[str] = None,
+    ) -> Tuple[Optional[Any], str]:
+        with self._lock:
+            self._request_counter += 1
+            counter = self._request_counter
+
+        if target_ip and not self.session_manager.is_ip_banned(target_ip):
+            current_ip = target_ip
+            session = self.session_manager.get_session_by_ip(current_ip)
+        else:
+            ip_info = self.session_manager.get_healthy_ip_info(preferred_index=counter)
+            if not ip_info:
+                logger.error("❌ Нет доступных не забаненных IP для запроса!")
+                return None, "unknown"
+            current_ip = ip_info["ip"]
+            session = self.session_manager.get_session_by_ip(current_ip)
+
+        if not session:
+            session = self.session_manager.get_session(counter)
+
+        response = self.session_manager.make_request_fast(
+            url=url,
+            session=session,
+            timeout=timeout,
+            max_retries=max_retries,
+            current_ip=current_ip,
         )
 
-    def _handle_429(self):
-        self._consecutive_429 += 1
-        self.session_manager.rotate_user_agent()
-        delay = self._calculate_delay()
-        logger.warning(f"🚫 429. Ждём {delay}с...")
-        time.sleep(delay)
+        if response is None and self.session_manager.is_ip_banned(current_ip):
+            fallback_info = self.session_manager.get_healthy_ip_info()
+            if fallback_info and fallback_info["ip"] != current_ip:
+                fallback_ip = fallback_info["ip"]
+                logger.warning(
+                    f"🔄 Переключение запроса с забаненного IP {current_ip} "
+                    f"на живой IP {fallback_ip}"
+                )
+                fallback_session = self.session_manager.get_session_by_ip(fallback_ip)
+                response = self.session_manager.make_request_fast(
+                    url=url,
+                    session=fallback_session,
+                    timeout=timeout,
+                    max_retries=max_retries,
+                    current_ip=fallback_ip,
+                )
+                return response, fallback_ip
 
-    def _reset_429_counter(self):
-        if self._consecutive_429 > 0:
-            logger.info(f"✅ Сброс 429 (было: {self._consecutive_429})")
-            self._consecutive_429 = 0
-
-    def _make_request(self, url: str, timeout: int = 30, max_retries: int = 3) -> Optional[Any]:
-        for attempt in range(max_retries):
-            delay = self._calculate_delay()
-            if attempt > 0:
-                logger.info(f"  ⏳ Попытка {attempt + 1}, задержка {delay:.1f}с...")
-            time.sleep(delay)
-
-            try:
-                response = self.session_manager.session.get(url, timeout=timeout)
-                if response.status_code == 429:
-                    self._handle_429()
-                    continue
-                if response.status_code == 200:
-                    self._reset_429_counter()
-                    return response
-                logger.warning(f"  ⚠️ Статус {response.status_code}")
-            except Exception as e:
-                logger.error(f"  ❌ Ошибка запроса: {e}")
-                time.sleep(5)
-        return None
-
-    def _make_request_fast(self, url: str, session, timeout: int = 10, max_retries: int = 2) -> Optional[Any]:
-        for attempt in range(max_retries):
-            try:
-                response = session.get(url, timeout=timeout)
-                if response.status_code == 429:
-                    wait = 2 * (attempt + 1)
-                    logger.warning(f"  🚫 429 в потоке, ждём {wait}с...")
-                    time.sleep(wait)
-                    continue
-                if response.status_code == 200:
-                    return response
-                logger.warning(f"  ⚠️ Статус {response.status_code}")
-            except Exception as e:
-                logger.error(f"  ❌ Ошибка запроса: {e}")
-                time.sleep(1)
-        return None
+        return response, current_ip
 
     def _build_search_url(
         self,
@@ -117,147 +111,72 @@ class SearchManager:
         price_to: Optional[int] = None,
     ) -> str:
         if records_per_page is None:
-            records_per_page = getattr(settings, "records_per_page", "50")
-        if records_per_page is not None and not records_per_page.startswith("_"):
+            records_per_page = str(getattr(settings, "records_per_page", "50") or "50")
+        records_per_page = str(records_per_page)
+        if not records_per_page.startswith("_"):
             records_per_page = f"_{records_per_page}"
 
         params = {
             "morphology": "on",
-            "search-filter": "Дате размещения",
+            "search-filter": "Дате обновления",
             "fz44": "on",
             "contractStageList_0": "on",
             "contractStageList": "0",
-            "budgetLevelsIdNameHidden": "{}",
             "sortBy": "UPDATE_DATE",
             "pageNumber": str(page),
             "sortDirection": "false",
             "recordsPerPage": records_per_page,
             "showLotsInfoHidden": "false",
         }
-
+        # contract_date_* = день updateDate (имена аргументов оставляем для совместимости)
         if contract_date_from:
-            params["contractDateFrom"] = contract_date_from
+            params["updateDateFrom"] = contract_date_from
         if contract_date_to:
-            params["contractDateTo"] = contract_date_to
+            params["updateDateTo"] = contract_date_to
         if price_from is not None:
             params["contractPriceFrom"] = str(price_from)
         if price_to is not None:
             params["contractPriceTo"] = str(price_to)
 
-        return f"{self.BASE_SEARCH_URL}?{urlencode(params, safe='{}')}"
+        return f"{self.BASE_SEARCH_URL}?{urlencode(params)}"
 
     def _parse_total_records(self, html_content: str) -> int:
         try:
             soup = BeautifulSoup(html_content, "html.parser")
-            
-            # === 1. Точное попадание по твоей верстке: div.search-results__total ===
             total_elem = soup.find("div", class_="search-results__total")
             if total_elem:
                 text = total_elem.get_text(strip=True)
-                # Убираем "более", "около" и т.д.
-                text_clean = re.sub(
-                    r"^(более|около|примерно|свыше)\s+",
-                    "",
-                    text,
-                    flags=re.IGNORECASE,
-                )
-                # Ищем число с любыми пробелами (включая &nbsp;)
-                match = re.search(r"([\d\s\u00a0\u202f]+)", text_clean)
+                match = re.search(r"([\d\s\xa0\u202f]+)", text)
                 if match:
-                    num_str = (
-                        match.group(1)
-                        .replace(" ", "")
-                        .replace("\xa0", "")
-                        .replace("\u202f", "")
-                    )
+                    num_str = re.sub(r"\D", "", match.group(1))
                     if num_str.isdigit():
                         return int(num_str)
-
-            # === 2. Fallback: поиск по всему тексту ===
-            text = soup.get_text()
-            # Явно указываем \u00a0 и \u202f в паттерне
-            match = re.search(
-                r"(\d[\d\s\u00a0\u202f]*)\s*запис",
-                text,
-                re.IGNORECASE,
-            )
-            if match:
-                num_str = (
-                    match.group(1)
-                    .replace(" ", "")
-                    .replace("\xa0", "")
-                    .replace("\u202f", "")
-                )
-                return int(num_str)
-
-            # === 3. Fallback: span.search-results__total (старая верстка) ===
-            count_elem = soup.find("span", class_=re.compile(r"search-results__total"))
-            if count_elem:
-                num_str = (
-                    count_elem.get_text(strip=True)
-                    .replace(" ", "")
-                    .replace("\xa0", "")
-                    .replace("\u202f", "")
-                )
-                if num_str.isdigit():
-                    return int(num_str)
-
+            return 0
+        except Exception:
             return 0
 
-        except Exception as e:
-            logger.debug(f"🔍 Не удалось определить количество записей: {e}")
-            return 0
+    @staticmethod
+    def _cache_key(date_from_iso: str, date_to_iso: str, price_from, price_to) -> str:
+        return f"upd|{date_from_iso}|{date_to_iso}|{price_from}|{price_to or 'inf'}"
 
-    # === ГЕНЕРАЦИЯ ОКОН ===
-
-    def _generate_windows_aggregated(self) -> Generator[Tuple[str, str, int, Optional[int]], None, None]:
-        today = datetime.now().date()
-        start_date = today - timedelta(days=1095)
-        yesterday = today - timedelta(days=1)
-
-        logger.info(f"📅 Агрегированная генерация: {start_date.strftime('%d.%m.%Y')} – {yesterday.strftime('%d.%m.%Y')}")
-
-        current = start_date
-        buffer_date_from = None
-        buffer_date_to = None
-        buffer_records = 0
-
-        while current <= yesterday:
-            week_end = min(current + timedelta(days=6), yesterday)
-            week_records = self._check_records(current, week_end, self.DEFAULT_PRICE_FROM, self.MAX_PRICE_TO)
-
-            if week_records >= self.MAX_RECORDS_PER_WINDOW:
-                if buffer_records > 0:
-                    yield (buffer_date_from.strftime("%d.%m.%Y"), buffer_date_to.strftime("%d.%m.%Y"), self.DEFAULT_PRICE_FROM, self.MAX_PRICE_TO)
-                    buffer_date_from = None
-                    buffer_date_to = None
-                    buffer_records = 0
-                yield from self._split_date_range_aggregated(current, week_end)
-                current = week_end + timedelta(days=1)
-                continue
-
-            if buffer_records == 0:
-                buffer_date_from = current
-                buffer_date_to = week_end
-                buffer_records = week_records
-            elif buffer_records + week_records < self.MAX_RECORDS_PER_WINDOW:
-                buffer_date_to = week_end
-                buffer_records += week_records
-            else:
-                yield (buffer_date_from.strftime("%d.%m.%Y"), buffer_date_to.strftime("%d.%m.%Y"), self.DEFAULT_PRICE_FROM, self.MAX_PRICE_TO)
-                buffer_date_from = current
-                buffer_date_to = week_end
-                buffer_records = week_records
-
-            current = week_end + timedelta(days=1)
-
-        if buffer_records > 0:
-            yield (buffer_date_from.strftime("%d.%m.%Y"), buffer_date_to.strftime("%d.%m.%Y"), self.DEFAULT_PRICE_FROM, self.MAX_PRICE_TO)
-
-    def _check_records(self, date_from: datetime.date, date_to: datetime.date, price_from: int, price_to: Optional[int] = None) -> int:
-        key = f"{date_from.isoformat()}|{date_to.isoformat()}|{price_from}|{price_to or 'inf'}"
-        if key in self._records_cache:
-            return self._records_cache[key]
+    def _check_records(
+        self,
+        date_from: date,
+        date_to: date,
+        price_from: int,
+        price_to: Optional[int] = None,
+        target_ip: Optional[str] = None,
+    ) -> Optional[int]:
+        """
+        None = ошибка сети/HTTP (НЕ путать с 0 записей).
+        0 = реально пустая выдача.
+        """
+        key = self._cache_key(
+            date_from.isoformat(), date_to.isoformat(), price_from, price_to
+        )
+        with self._lock:
+            if key in self._records_cache:
+                return self._records_cache[key]
 
         url = self._build_search_url(
             page=1,
@@ -266,168 +185,279 @@ class SearchManager:
             price_from=price_from,
             price_to=price_to,
         )
-        response = self._make_request(url, timeout=15, max_retries=2)
-        if response and response.status_code == 200:
-            result = self._parse_total_records(response.text)
+        response = self._make_request_with_ip(
+            url, timeout=30, max_retries=3, target_ip=target_ip
+        )[0]
+
+        if response is None or getattr(response, "status_code", None) != 200:
+            logger.warning(
+                f"⚠️ _check_records fail {date_from}–{date_to} "
+                f"status={getattr(response, 'status_code', None)}"
+            )
+            return None
+
+        result = self._parse_total_records(response.text)
+        with self._lock:
             self._records_cache[key] = result
-            return result
+        return result
 
-        logger.warning(f"⚠️ Не удалось проверить окно {date_from}-{date_to}")
-        return 9999
+    def _grow_window_greedy_forward(
+        self, date_from: date, hard_limit_end: date
+    ) -> date:
+        """Жадно расширяем окно вперёд. При ошибке сети — только 1 день."""
+        target = int(self.MAX_RECORDS_PER_WINDOW * self.GREEDY_TARGET_RATIO)
+        step_days = 6
+        best_end = min(date_from + timedelta(days=step_days), hard_limit_end)
+        best_total = self._check_records(
+            date_from, best_end, self.DEFAULT_PRICE_FROM, self.MAX_PRICE_TO
+        )
 
-    def _split_date_range_aggregated(self, date_from: datetime.date, date_to: datetime.date, price_from: int = DEFAULT_PRICE_FROM, price_to: Optional[int] = None) -> Generator[Tuple[str, str, int, Optional[int]], None, None]:
-        if price_to is None:
-            price_to = self.MAX_PRICE_TO
+        if best_total is None:
+            logger.warning(
+                f"⚠️ grow: нет ответа для {date_from}–{best_end}, окно = 1 день"
+            )
+            return date_from
 
-        records = self._check_records(date_from, date_to, price_from, price_to)
-        if records < self.MAX_RECORDS_PER_WINDOW:
-            yield (date_from.strftime("%d.%m.%Y"), date_to.strftime("%d.%m.%Y"), price_from, price_to)
+        if best_total >= target or best_end >= hard_limit_end:
+            return best_end
+
+        while True:
+            step_days *= 2
+            candidate_end = min(date_from + timedelta(days=step_days), hard_limit_end)
+            total = self._check_records(
+                date_from, candidate_end, self.DEFAULT_PRICE_FROM, self.MAX_PRICE_TO
+            )
+
+            if total is None:
+                return best_end
+
+            if total > self.MAX_RECORDS_PER_WINDOW:
+                return best_end
+
+            best_end, best_total = candidate_end, total
+            if total >= target or candidate_end >= hard_limit_end:
+                return best_end
+
+    def _generate_windows_aggregated(
+        self,
+    ) -> Generator[Tuple[str, str, int, Optional[int]], None, None]:
+        """Один день = updateDate. С сегодня → START_DATE. При >4800 — split по цене."""
+        today = datetime.now().date()
+        start_limit = self.START_DATE
+
+        logger.info(
+            f"📦 Окна updateDate: {today.strftime('%d.%m.%Y')} ← "
+            f"{start_limit.strftime('%d.%m.%Y')} (от новых к старым)..."
+        )
+
+        current = today
+        while current >= start_limit:
+            yield from self._split_window_recursive(
+                current, current, self.DEFAULT_PRICE_FROM, self.MAX_PRICE_TO
+            )
+            current -= timedelta(days=1)
+
+    def _split_window_recursive(
+        self,
+        date_from: date,
+        date_to: date,
+        price_from: int,
+        price_to: Optional[int] = None,
+    ) -> Generator[Tuple[str, str, int, Optional[int]], None, None]:
+        total = self._check_records(date_from, date_to, price_from, price_to)
+
+        if total is None:
+            logger.error(
+                f"❌ split: нет ответа ЕИС для {date_from}–{date_to}, окно пропущено"
+            )
+            return
+
+        if total <= self.MAX_RECORDS_PER_WINDOW:
+            yield (
+                date_from.strftime("%d.%m.%Y"),
+                date_to.strftime("%d.%m.%Y"),
+                price_from,
+                price_to,
+            )
             return
 
         if date_from == date_to:
-            yield from self._split_by_price_binary_parallel(date_from, price_from, price_to)
+            logger.info(
+                f"  ⚠️ {date_from}: {total} записей за день > лимита → дробим по цене"
+            )
+            yield from self._split_by_price(
+                date_from, price_from, price_to or 1_000_000_000
+            )
             return
 
         days_diff = (date_to - date_from).days
-        mid_offset = days_diff // 2
-        mid_date = date_from + timedelta(days=mid_offset)
+        mid_date = date_from + timedelta(days=days_diff // 2)
+        logger.info(
+            f"  ✂️ {date_from}-{date_to}: {total} записей > лимита → дробим дату пополам"
+        )
 
-        logger.info(f"📊 {date_from}-{date_to}: {records} записей → дробим дату")
-        yield from self._split_date_range_aggregated(date_from, mid_date, price_from, price_to)
-        yield from self._split_date_range_aggregated(mid_date + timedelta(days=1), date_to, price_from, price_to)
+        # сначала старая половина, потом новая
+        yield from self._split_window_recursive(
+            date_from, mid_date, price_from, price_to
+        )
+        yield from self._split_window_recursive(
+            mid_date + timedelta(days=1), date_to, price_from, price_to
+        )
 
-    def _split_by_price_binary_parallel(self, date: datetime.date, price_from: int, price_to: Optional[int] = None) -> Generator[Tuple[str, str, int, Optional[int]], None, None]:
-        if price_to is None:
-            price_to = self.MAX_PRICE_TO
-        if price_from >= price_to or (price_to - price_from) < self.MIN_PRICE_RANGE:
-            yield (date.strftime("%d.%m.%Y"), date.strftime("%d.%m.%Y"), price_from, price_to)
-            return
+    def _find_price_leaves(
+        self, date_item: date, price_from: int, price_to: int
+    ) -> List[Tuple[int, int, int]]:
+        total_records = self._check_records(date_item, date_item, price_from, price_to)
+        if total_records is None:
+            return []
+        if total_records <= self.MAX_RECORDS_PER_WINDOW:
+            return [(price_from, price_to, total_records)]
 
-        total_records = self._check_records(date, date, price_from, price_to)
-        if total_records < self.MAX_RECORDS_PER_WINDOW:
-            yield (date.strftime("%d.%m.%Y"), date.strftime("%d.%m.%Y"), price_from, price_to)
-            return
-
-        logger.info(f"📊 {date}: {price_from:,}-{price_to:,} = {total_records} → бинарное дробление")
-
-        queue = deque()
-        queue.append((price_from, price_to, 0))
+        leaves: List[Tuple[int, int, int]] = []
+        queue = deque([(price_from, price_to)])
 
         while queue:
-            level_items = []
-            current_depth = queue[0][2]
-            while queue and queue[0][2] == current_depth:
-                level_items.append(queue.popleft())
-            if not level_items:
-                break
+            pf, pt = queue.popleft()
+            records = self._check_records(date_item, date_item, pf, pt)
+            if records is None:
+                continue
+            if records <= self.MAX_RECORDS_PER_WINDOW:
+                leaves.append((pf, pt, records))
+            elif (pt - pf) <= self.MIN_PRICE_RANGE:
+                logger.warning(
+                    f"  ⚠️ {date_item}: {pf:,}-{pt:,} = {records}, мин. ценовой диапазон"
+                )
+                leaves.append((pf, pt, records))
+            else:
+                mid = pf + (pt - pf) // 2
+                queue.append((pf, mid))
+                queue.append((mid, pt))
 
-            windows_to_check = []
-            for pf, pt, _ in level_items:
-                key = f"{date.isoformat()}|{date.isoformat()}|{pf}|{pt or 'inf'}"
-                if key in self._records_cache:
-                    records = self._records_cache[key]
-                    if records < self.MAX_RECORDS_PER_WINDOW:
-                        yield (date.strftime("%d.%m.%Y"), date.strftime("%d.%m.%Y"), pf, pt)
-                        continue
-                    elif (pt - pf) <= self.MIN_PRICE_RANGE:
-                        logger.warning(f"⚠️ {date}: {pf:,}-{pt:,} = {records}, мин. диапазон достигнут")
-                        yield (date.strftime("%d.%m.%Y"), date.strftime("%d.%m.%Y"), pf, pt)
-                        continue
-                    else:
-                        mid = pf + (pt - pf) // 2
-                        queue.append((pf, mid, current_depth + 1))
-                        queue.append((mid, pt, current_depth + 1))
-                        continue
-                else:
-                    windows_to_check.append((pf, pt))
+        leaves.sort(key=lambda x: x[0])
+        return leaves
 
-            if windows_to_check:
-                results = self._check_windows_parallel(date, windows_to_check)
-                for (pf, pt), records in results:
-                    if records < self.MAX_RECORDS_PER_WINDOW:
-                        yield (date.strftime("%d.%m.%Y"), date.strftime("%d.%m.%Y"), pf, pt)
-                    elif (pt - pf) <= self.MIN_PRICE_RANGE:
-                        logger.warning(f"⚠️ {date}: {pf:,}-{pt:,} = {records}, мин. диапазон достигнут")
-                        yield (date.strftime("%d.%m.%Y"), date.strftime("%d.%m.%Y"), pf, pt)
-                    else:
-                        logger.info(f"📊 {date}: {pf:,}-{pt:,} = {records} → дробим")
-                        mid = pf + (pt - pf) // 2
-                        queue.append((pf, mid, current_depth + 1))
-                        queue.append((mid, pt, current_depth + 1))
+    def _merge_price_leaves(
+        self, date_item: date, leaves: List[Tuple[int, int, int]]
+    ) -> Generator[Tuple[str, str, int, Optional[int]], None, None]:
+        if not leaves:
+            return
+        date_str = date_item.strftime("%d.%m.%Y")
+        buf_pf, buf_pt, buf_records = leaves[0]
+        merged_count = 1
 
-    def _check_windows_parallel(self, date: datetime.date, windows: List[Tuple[int, int]]) -> List[Tuple[Tuple[int, int], int]]:
-        if not windows:
+        for pf, pt, records in leaves[1:]:
+            if pf == buf_pt and buf_records + records <= self.MAX_RECORDS_PER_WINDOW:
+                buf_pt = pt
+                buf_records += records
+                merged_count += 1
+            else:
+                if merged_count > 1:
+                    logger.info(
+                        f"  🔗 {date_item}: склеено {merged_count} ценовых окон → "
+                        f"{buf_pf:,}-{buf_pt:,} = {buf_records}"
+                    )
+                yield (date_str, date_str, buf_pf, buf_pt)
+                buf_pf, buf_pt, buf_records = pf, pt, records
+                merged_count = 1
+
+        if merged_count > 1:
+            logger.info(
+                f"  🔗 {date_item}: склеено {merged_count} ценовых окон → "
+                f"{buf_pf:,}-{buf_pt:,} = {buf_records}"
+            )
+        yield (date_str, date_str, buf_pf, buf_pt)
+
+    def _split_by_price(
+        self, date_item: date, price_from: int, price_to: int
+    ) -> Generator[Tuple[str, str, int, Optional[int]], None, None]:
+        leaves = self._find_price_leaves(date_item, price_from, price_to)
+        yield from self._merge_price_leaves(date_item, leaves)
+
+    def _fetch_page_batch_multi_ip(
+        self, urls: List[str], ip_pool: List[str]
+    ) -> List[Tuple[Optional[Any], str]]:
+        if not urls:
             return []
 
-        results = []
-        max_workers = min(getattr(settings, "max_check_workers", 5), len(windows))
+        if not ip_pool:
+            plain = self._fetch_page_batch(urls, target_ip=None)
+            return [(r, "unknown") for r in plain]
 
-        def check_one(args):
-            window, session = args
-            pf, pt = window
-            key = f"{date.isoformat()}|{date.isoformat()}|{pf}|{pt or 'inf'}"
-            if key in self._records_cache:
-                return (pf, pt, self._records_cache[key])
+        # не больше 4 IP в пачке — меньше давление на WAF
+        ip_pool = ip_pool[:4]
+        n_ip = len(ip_pool)
+        results: List[Tuple[Optional[Any], str]] = [(None, "unknown")] * len(urls)
 
-            url = self._build_search_url(
-                page=1,
-                contract_date_from=date.strftime("%d.%m.%Y"),
-                contract_date_to=date.strftime("%d.%m.%Y"),
-                price_from=pf,
-                price_to=pt,
+        def fetch_one(idx: int, url: str, ip: str):
+            resp = None
+            for attempt in range(1, 4):
+                resp = self._make_request_with_ip(
+                    url, timeout=30, max_retries=2, target_ip=ip
+                )[0]
+                if resp is not None and getattr(resp, "status_code", None) == 200:
+                    break
+                backoff = (2**attempt) + random.uniform(0, 1.5)
+                logger.warning(
+                    f"⚠️ Стр.idx={idx} IP={ip} попытка {attempt}/3, сон {backoff:.1f}с"
+                )
+                time.sleep(backoff)
+            return idx, resp, ip
+
+        for batch_start in range(0, len(urls), n_ip):
+            batch_urls = urls[batch_start : batch_start + n_ip]
+            batch_num = batch_start // n_ip + 1
+            logger.info(
+                f"  ⚡ Пачка {batch_num}: страницы "
+                f"{batch_start + 1}-{batch_start + len(batch_urls)} "
+                f"({len(batch_urls)} IP)"
             )
-            for attempt in range(2):
-                try:
-                    response = session.get(url, timeout=15)
-                    if response.status_code == 429:
-                        time.sleep(2 * (attempt + 1))
-                        continue
-                    if response.status_code == 200:
-                        result = self._parse_total_records(response.text)
-                        with self._lock:
-                            self._records_cache[key] = result
-                        return (pf, pt, result)
-                except Exception as e:
-                    logger.error(f"  ❌ Ошибка проверки окна {pf}-{pt}: {e}")
-                    time.sleep(1)
-            return (pf, pt, 9999)
 
-        args = [(w, self.session_manager.get_session(i)) for i, w in enumerate(windows)]
+            tasks = []
+            for j, url in enumerate(batch_urls):
+                idx = batch_start + j
+                ip = ip_pool[j % n_ip]
+                tasks.append((idx, url, ip))
 
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(check_one, a): a for a in args}
-            for future in as_completed(futures):
-                pf, pt, records = future.result()
-                results.append(((pf, pt), records))
-                logger.debug(f"  📊 Проверено: {pf:,}-{pt:,} = {records} записей")
+            with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+                futures = [
+                    executor.submit(fetch_one, idx, url, ip) for idx, url, ip in tasks
+                ]
+                for fut in as_completed(futures):
+                    idx, resp, ip = fut.result()
+                    results[idx] = (resp, ip)
+
+            if batch_start + n_ip < len(urls):
+                time.sleep(random.uniform(3.0, 6.0))
 
         return results
 
-    def _fetch_page_batch(self, urls: List[str], batch_size: int = 3) -> List[Optional[Any]]:
+    def _fetch_page_batch(
+        self, urls: List[str], batch_size: int = 3, target_ip: Optional[str] = None
+    ) -> List[Optional[Any]]:
         results = []
-        for i in range(0, len(urls), batch_size):
-            batch = urls[i:i + batch_size]
-            batch_results = [None] * len(batch)
-            logger.info(f"  ⚡ Пачка {i//batch_size + 1}: страницы {i+1}-{min(i+batch_size, len(urls))}")
-
-            with ThreadPoolExecutor(max_workers=len(batch)) as executor:
-                future_to_idx = {executor.submit(self._make_request, url): idx for idx, url in enumerate(batch)}
-                for future in as_completed(future_to_idx):
-                    idx = future_to_idx[future]
-                    try:
-                        response = future.result(timeout=30)
-                        batch_results[idx] = response
-                        if response:
-                            self._reset_429_counter()
-                    except Exception as e:
-                        logger.error(f"  ❌ Ошибка загрузки страницы: {e}")
-
-            results.extend(batch_results)
-            if i + batch_size < len(urls):
-                if self._consecutive_429 >= 2:
-                    pause = random.uniform(1.0, 2.0)
-                    logger.warning(f"   ⏳ Пауза после 429: {pause:.1f}с")
-                    time.sleep(pause)
+        for i, url in enumerate(urls):
+            if i > 0:
+                if i % 20 == 0:
+                    cooldown = random.uniform(12.0, 20.0)
+                    logger.info(
+                        f"   ❄️ Плановое остывание после {i} страниц: {cooldown:.1f}с"
+                    )
+                    time.sleep(cooldown)
                 else:
-                    time.sleep(random.uniform(0.0, 0.2))
+                    time.sleep(random.uniform(1.8, 3.5))
+
+            resp = None
+            for attempt in range(1, 4):
+                resp = self._make_request_with_ip(
+                    url, timeout=30, max_retries=2, target_ip=target_ip
+                )[0]
+                if resp is not None and resp.status_code == 200:
+                    break
+                backoff = (2**attempt) + random.uniform(0, 2)
+                logger.warning(
+                    f"⚠️ Страница {i+1} не загружена ({attempt}/3). "
+                    f"Повтор через {backoff:.1f}с..."
+                )
+                time.sleep(backoff)
+            results.append(resp)
         return results

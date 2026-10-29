@@ -112,6 +112,25 @@ class RejectionsCache:
         except Exception as e:
             logger.error(f"❌ Ошибка загрузки кэша отказов: {e}")
             self._data = {}
+            
+    def cleanup_expired(self) -> int:
+        """Удаляет записи старше ttl_days. Возвращает кол-во удалённых."""
+        with self._lock:
+            cutoff = datetime.now() - timedelta(days=self.ttl_days)
+            to_remove = []
+            for reestr_number, state in self._data.items():
+                try:
+                    last_check_dt = datetime.fromisoformat(state.last_check)
+                except ValueError:
+                    continue
+                if last_check_dt < cutoff:
+                    to_remove.append(reestr_number)
+            for k in to_remove:
+                del self._data[k]
+            if to_remove:
+                logger.info(f"🧹 Удалено устаревших записей: {len(to_remove)}")
+                self._schedule_save()
+            return len(to_remove)
 
     def _save(self):
         """Сохраняет кэш в файл"""
